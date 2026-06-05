@@ -1,90 +1,202 @@
 #!/usr/bin/env python3
 """
-Configure Firefox SOCKS5 proxy for all active profiles.
+Configure Firefox SOCKS5 proxy for all existing profiles.
+
+Usage:
+    configure-firefox-proxy                        # enable proxy on all profiles
+    configure-firefox-proxy clear                  # clear proxy from all profiles
 """
 import json
 import os
 import sys
 from pathlib import Path
 
-def set_firefox_proxy(socks_host="127.0.0.1", socks_port=1080):
-    """Configure Firefox to use SOCKS5 proxy for all profiles."""
-    firefox_dir = Path.home() / ".config/mozilla/firefox"
-    
+PROXY_TYPE_LINE = 'user_pref("network.proxy.type", 1);'
+PROXY_TYPE_CLEAR = 'user_pref("network.proxy.type", 0);'
+OUTLINE_MARKER = "Auto-configured by Outline SS CLI"
+
+
+def _find_firefox_profiles():
+    """Find all Firefox profile directories by scanning for prefs.js.
+
+    This is much more reliable than checking for .parentlock (which only
+    exists while Firefox is running).  We operate on *every* profile so
+    that stale proxy settings are never left behind after a reboot /
+    crash / session end.
+    """
+    firefox_dir = Path.home() / ".config" / "mozilla" / "firefox"
+
     if not firefox_dir.exists():
-        print(f"⚠ Firefox directory not found: {firefox_dir}")
+        # Fallback: traditional ~/.mozilla location
+        firefox_dir = Path.home() / ".mozilla" / "firefox"
+    if not firefox_dir.exists():
+        rel = Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox"
+        if rel.exists():
+            firefox_dir = rel
+    if not firefox_dir.exists():
+        return []
+
+    # Collect all directories that contain a prefs.js
+    profiles = []
+    for pf in firefox_dir.glob("*.default*/prefs.js"):
+        profiles.append(pf.parent)
+    for pf in firefox_dir.glob("*.default-release*/prefs.js"):
+        profiles.append(pf.parent)
+    for pf in firefox_dir.glob("*.Profile */prefs.js"):
+        profiles.append(pf.parent)
+
+    # Deduplicate
+    return sorted(set(profiles), key=lambda p: p.name)
+
+
+def _set_prefs_js_proxy(profile, socks_host="127.0.0.1", socks_port=1080):
+    """Update prefs.js directly so proxy works even if user.js is stale."""
+    prefs = profile / "prefs.js"
+    if not prefs.exists():
+        return False
+
+    lines = prefs.read_text(encoding="utf-8", errors="replace").splitlines(True)
+    new_lines = []
+    seen_type = False
+    seen_socks = False
+    seen_socks_port = False
+    seen_no_proxies = False
+    seen_tls = False
+
+    for line in lines:
+        s = line.strip()
+        if 'network.proxy.type' in s:
+            new_lines.append(f'user_pref("network.proxy.type", 1);\n')
+            seen_type = True
+        elif 'network.proxy.socks_port' in s:
+            new_lines.append(f'user_pref("network.proxy.socks_port", {socks_port});\n')
+            seen_socks_port = True
+        elif 'network.proxy.socks"' in s or 'network.proxy.socks,' in s:
+            new_lines.append(f'user_pref("network.proxy.socks", "{socks_host}");\n')
+            seen_socks = True
+        elif 'network.proxy.no_proxies_on' in s:
+            new_lines.append('user_pref("network.proxy.no_proxies_on", "localhost, 127.0.0.1");\n')
+            seen_no_proxies = True
+        elif 'network.proxy.proxy_over_tls' in s:
+            new_lines.append('user_pref("network.proxy.proxy_over_tls", true);\n')
+            seen_tls = True
+        else:
+            new_lines.append(line)
+
+    if not seen_type:
+        new_lines.append('user_pref("network.proxy.type", 1);\n')
+    if not seen_socks:
+        new_lines.append(f'user_pref("network.proxy.socks", "{socks_host}");\n')
+    if not seen_socks_port:
+        new_lines.append(f'user_pref("network.proxy.socks_port", {socks_port});\n')
+    if not seen_no_proxies:
+        new_lines.append('user_pref("network.proxy.no_proxies_on", "localhost, 127.0.0.1");\n')
+    if not seen_tls:
+        new_lines.append('user_pref("network.proxy.proxy_over_tls", true);\n')
+
+    prefs.write_text("".join(new_lines), encoding="utf-8")
+    return True
+
+
+def _clear_prefs_js_proxy(profile):
+    """Set proxy type to 0 (direct) and neuter socks entries."""
+    prefs = profile / "prefs.js"
+    if not prefs.exists():
+        return False
+
+    lines = prefs.read_text(encoding="utf-8", errors="replace").splitlines(True)
+    new_lines = []
+    for line in lines:
+        s = line.strip()
+        if 'network.proxy.type' in s:
+            new_lines.append('user_pref("network.proxy.type", 0);\n')
+        elif 'network.proxy.socks_port' in s:
+            new_lines.append('user_pref("network.proxy.socks_port", 0);\n')
+        elif 'network.proxy.socks"' in s or 'network.proxy.socks,' in s:
+            new_lines.append('user_pref("network.proxy.socks", "");\n')
+        elif 'network.proxy.no_proxies_on' in s:
+            new_lines.append('user_pref("network.proxy.no_proxies_on", "");\n')
+        elif 'network.proxy.proxy_over_tls' in s:
+            new_lines.append('user_pref("network.proxy.proxy_over_tls", false);\n')
+        else:
+            new_lines.append(line)
+    prefs.write_text("".join(new_lines), encoding="utf-8")
+    return True
+
+
+def set_firefox_proxy(socks_host="127.0.0.1", socks_port=1080):
+    """Configure all Firefox profiles to use the SOCKS5 proxy."""
+    firefox_dir = Path.home() / ".config" / "mozilla" / "firefox"
+    if not firefox_dir.exists():
+        firefox_dir = Path.home() / ".mozilla" / "firefox"
+    if not firefox_dir.exists():
+        print(f"\u26a0 Firefox directory not found")
         return
-    
-    # Find all profiles with parentlock (currently active)
-    profiles = [p.parent for p in firefox_dir.glob("*/.parentlock")]
-    
+
+    profiles = _find_firefox_profiles()
     if not profiles:
-        print("⚠ No active Firefox profiles found")
+        print("\u26a0 No Firefox profiles found")
         return
-    
-    print(f"🦊 Configuring Firefox proxy for {len(profiles)} profiles...")
-    
+
+    print(f"\U0001f980 Configuring Firefox proxy for {len(profiles)} profiles...")
+
     for profile in profiles:
-        prefs_file = profile / "prefs.js"
         user_js = profile / "user.js"
-        
-        # Backup user.js if exists
+        # Remove any existing user.js (which would override prefs.js on every launch)
         if user_js.exists():
-            backup = user_js.with_suffix(".js.outline-bak")
-            if not backup.exists():
-                user_js.rename(backup)
-        
-        # Write proxy configuration
-        with open(user_js, "w") as f:
-            f.write("// Auto-configured by Outline SS CLI\n")
-            f.write(f'user_pref("network.proxy.type", 1);\n')
-            f.write(f'user_pref("network.proxy.socks", "{socks_host}");\n')
-            f.write(f'user_pref("network.proxy.socks_port", {socks_port});\n')
-            f.write(f'user_pref("network.proxy.no_proxies_on", "localhost, 127.0.0.1");\n')
-            f.write(f'user_pref("network.proxy.proxy_over_tls", true);\n')
-        
-        print(f"✓ Configured: {profile.name}")
-        print(f"  SOCKS5 proxy: {socks_host}:{socks_port}")
-    
-    print("\n⚠ Restart Firefox to apply proxy settings")
+            user_js.unlink()
+        # Also remove stale backups
+        bak = profile / "user.js.outline-bak"
+        if bak.exists():
+            bak.unlink()
+
+        # Write prefs.js entries directly
+        _set_prefs_js_proxy(profile, socks_host, socks_port)
+
+        print(f"  \u2713 {profile.name}  \u2192 socks5://{socks_host}:{socks_port}")
 
 
 def clear_firefox_proxy():
-    """Clear Firefox proxy settings for all profiles."""
-    firefox_dir = Path.home() / ".config/mozilla/firefox"
-    
+    """Clear proxy settings from ALL Firefox profiles."""
+    firefox_dir = Path.home() / ".config" / "mozilla" / "firefox"
+    if not firefox_dir.exists():
+        firefox_dir = Path.home() / ".mozilla" / "firefox"
     if not firefox_dir.exists():
         return
-    
-    profiles = [p.parent for p in firefox_dir.glob("*/.parentlock")]
-    
+
+    profiles = _find_firefox_profiles()
     if not profiles:
         return
-    
-    print(f"🦊 Clearing Firefox proxy for {len(profiles)} profiles...")
-    
+
+    print(f"\U0001f980 Clearing Firefox proxy for {len(profiles)} profiles...")
+
     for profile in profiles:
+        # Nuke user.js (Outline-created override file)
         user_js = profile / "user.js"
-        
         if user_js.exists():
             user_js.unlink()
-        
-        # Restore backup if exists
-        backup = user_js.with_suffix(".js.outline-bak")
-        if backup.exists():
-            backup.rename(user_js)
-        
-        print(f"✓ Cleared: {profile.name}")
-    
-    print("\n⚠ Restart Firefox to apply changes")
+        bak = profile / "user.js.outline-bak"
+        if bak.exists():
+            bak.unlink()
+
+        # Reset prefs.js proxy entries
+        _clear_prefs_js_proxy(profile)
+
+        print(f"  \u2713 {profile.name}")
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         if sys.argv[1] == "clear":
             clear_firefox_proxy()
+        elif sys.argv[1] == "status":
+            profiles = _find_firefox_profiles()
+            print(json.dumps({
+                "profile_count": len(profiles),
+                "profiles": [str(p.name) for p in profiles]
+            }))
         else:
             print(f"Unknown command: {sys.argv[1]}")
-            print("Usage: configure-firefox-proxy.py [clear]")
+            print("Usage: configure-firefox-proxy [clear|status]")
     else:
         set_firefox_proxy()

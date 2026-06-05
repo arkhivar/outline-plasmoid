@@ -6,8 +6,16 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/sslocal -c %h/.config/systemd/user/outline-ss@%i.conf
+ExecStopPost=-%h/.local/bin/outline-ss cleanup --profile %i
 Restart=on-failure
 RestartSec=5
+
+# NOTE: This service is *not* enabled by default. It is started/stopped
+# explicitly by the outline-ss CLI or plasmoid via systemctl --user.
+# ExecStopPost runs `outline-ss cleanup` whenever this service stops
+# (normal stop, crash, reboot), which resets KDE system proxy and Firefox
+# proxy settings — preventing the "internet broken after reboot" scenario.
+# The leading "-" means systemd ignores errors from the cleanup command.
 
 [Install]
 WantedBy=default.target

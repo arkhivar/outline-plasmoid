@@ -343,13 +343,47 @@ def cmd_disconnect(profile: str = DEFAULT_PROFILE):
         # Wait for shutdown
         time.sleep(0.3)
         
-        # Clear system proxy
-        _clear_kde_proxy()
+        # Clean up ALL proxy residues (KDE + Firefox)
+        _cleanup_proxy()
         
         print("ok")
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+def cmd_cleanup(profile: str = DEFAULT_PROFILE):
+    """Clean up proxy settings (for ExecStopPost hook or manual recovery)."""
+    import subprocess as sp
+    try:
+        _clear_kde_proxy()
+        ff_proxy = shutil.which("configure-firefox-proxy")
+        if ff_proxy:
+            sp.run([ff_proxy, "clear"], check=False)
+        print("ok")
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_recover():
+    """Emergency: purge ALL proxy settings and Firefox user.js overrides."""
+    import subprocess as sp
+    print("Emergency recovery: purging ALL Outline proxy residues...", file=sys.stderr)
+    _clear_kde_proxy()
+    ff_proxy = shutil.which("configure-firefox-proxy")
+    if ff_proxy:
+        sp.run([ff_proxy, "clear"], check=False)
+    print("ok", file=sys.stderr)
+
+
+def _cleanup_proxy():
+    """Full proxy cleanup: KDE + Firefox."""
+    import subprocess as sp
+    _clear_kde_proxy()
+    ff_proxy = shutil.which("configure-firefox-proxy")
+    if ff_proxy:
+        sp.run([ff_proxy, "clear"], check=False)
 
 
 def cmd_status(profile: str = DEFAULT_PROFILE):
@@ -410,6 +444,11 @@ def main():
     p_disconnect = sub.add_parser("disconnect", help="Disconnect from Outline server")
     p_disconnect.add_argument("--profile", "-p", default=DEFAULT_PROFILE, help="Profile name")
 
+    p_cleanup = sub.add_parser("cleanup", help="Clean up proxy settings (for systemd hooks)")
+    p_cleanup.add_argument("--profile", "-p", default=DEFAULT_PROFILE, help="Profile name")
+
+    p_recover = sub.add_parser("recover", help="Emergency: purge ALL proxy residues")
+
     p_status = sub.add_parser("status", help="Show connection status")
     p_status.add_argument("--profile", "-p", default=DEFAULT_PROFILE, help="Profile name")
 
@@ -419,6 +458,10 @@ def main():
         cmd_connect(args.url, args.profile, args.local_port)
     elif args.command == "disconnect":
         cmd_disconnect(args.profile)
+    elif args.command == "cleanup":
+        cmd_cleanup(args.profile)
+    elif args.command == "recover":
+        cmd_recover()
     elif args.command == "status":
         cmd_status(args.profile)
 

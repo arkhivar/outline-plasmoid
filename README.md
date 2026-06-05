@@ -89,7 +89,32 @@ outline-ss status --profile work
 
 # Disconnect
 outline-ss disconnect
+
+# Emergency: purge ALL proxy residues if internet breaks
+outline-ss recover
 ```
+
+## Safety — Preventing broken internet
+
+The plasmoid now has three layers of defense against orphaned proxy settings:
+
+| Layer | Mechanism | Trigger |
+|-------|-----------|---------|
+| **1. Disconnect cleanup** | `outline-ss disconnect` clears KDE + Firefox proxy | Every manual disconnect |
+| **2. Systemd stop hook** | `ExecStopPost=outline-ss cleanup` in the service unit | Service stops for ANY reason (reboot, crash, manual stop) |
+| **3. Emergency recovery** | `outline-ss recover` | Manual — run if browsers can't reach internet |
+
+**If your browsers break** (can't reach internet but `curl google.com` works):
+```bash
+outline-ss recover
+systemctl --user restart xdg-desktop-portal.service
+```
+
+**Why this can happen:** Firefox's `user.js` (written by the old code) overrides
+proxy preferences on every launch, and KDE's `kioslaverc` feeds
+`xdg-desktop-portal`, which both Firefox and Chromium-based browsers query for
+proxy settings. If the sslocal proxy dies unexpectedly, these settings point to
+a dead `127.0.0.1:1080` and browsers break.
 
 ## Files
 

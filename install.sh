@@ -34,6 +34,29 @@ cp "$SCRIPT_DIR/systemd/outline-ss@.service" "$SYSTEMD_USER_DIR/outline-ss@.serv
 systemctl --user daemon-reload
 echo "   ✓ outline-ss@.service (daemon-reloaded)"
 
+# ── 2.5. Clean up stale proxy state from previous broken sessions ────────
+echo ""
+echo "── Cleaning up stale proxy state..."
+"$BIN_DIR/configure-firefox-proxy" clear 2>/dev/null || true
+
+# Nuke any stray user.js files Outline may have left behind
+for userjs in "$HOME/.config/mozilla/firefox"/*/user.js "$HOME/.mozilla/firefox"/*/user.js; do
+    if [ -f "$userjs" ]; then
+        grep -q "Auto-configured by Outline" "$userjs" 2>/dev/null && rm -f "$userjs"
+    fi
+done 2>/dev/null || true
+
+# Reset KDE proxy to direct if it got stuck
+if command -v kwriteconfig6 >/dev/null 2>&1; then
+    kwriteconfig6 --file kioslaverc --group "Proxy Settings" --key ProxyType --type int 0 2>/dev/null || true
+elif command -v kwriteconfig5 >/dev/null 2>&1; then
+    kwriteconfig5 --file kioslaverc --group "Proxy Settings" --key ProxyType --type int 0 2>/dev/null || true
+elif [ -f "$HOME/.config/kioslaverc" ]; then
+    sed -i 's/ProxyType=.*/ProxyType=0/' "$HOME/.config/kioslaverc" 2>/dev/null || true
+    sed -i '/socks5/d' "$HOME/.config/kioslaverc" 2>/dev/null || true
+fi
+echo "   ✓ stale state cleaned"
+
 # ── 3. Install plasmoid ─────────────────────────────────────────────────
 echo ""
 echo "── Installing plasmoid"

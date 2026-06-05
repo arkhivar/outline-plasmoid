@@ -27,10 +27,10 @@ outline-plasmoid/
 │           ├── config.qml      # Config category loaded by plasma
 │           └── main.xml        # Persistent config schema (ssconf_url, local_port)
 ├── cli/
-│   ├── outline-ss              # Python CLI: connect/disconnect/status
-│   └── configure-firefox-proxy # Python: sets Firefox SOCKS5 user.js per-profile
+│   ├── outline-ss              # Python CLI: connect/disconnect/status/cleanup/recover
+│   └── configure-firefox-proxy # Python: sets/clears Firefox SOCKS5 on ALL profiles
 └── systemd/
-    └── outline-ss@.service     # systemd user unit template
+│   └── outline-ss@.service     # systemd user unit (ExecStopPost → outline-ss cleanup)
 ```
 
 ## Key rules
@@ -68,7 +68,9 @@ outline-plasmoid/
 - `connect` → resolve `ssconf://` URL over HTTPS, parse JSON/YAML config,
   write to `~/.config/systemd/user/outline-ss@<profile>.conf` with `0600`,
   start `systemctl --user start outline-ss@<profile>.service`
-- `disconnect` → `systemctl --user stop ...`, clear proxy
+- `disconnect` → `systemctl --user stop ...`, clear KDE + Firefox proxy
+- `cleanup` → clear KDE + Firefox proxy without touching service (ExecStopPost hook)
+- `recover` → emergency: purge ALL proxy residues (KDE, Firefox, desktop portal)
 - `status` → JSON output: `{"status": "connected", "server": "...", ...}`
 
 The `ssconf://` protocol requires HTTPS to the Outline management API.
@@ -105,5 +107,7 @@ Manual testing workflow:
 - **sslocal not found**: install shadowsocks-rust (`cargo install shadowsocks-rust` or COPR)
 - **Plasmoid doesn't load**: check `journalctl --user -f -u plasma-plasmashell` for QML errors
 - **systemd unit fails**: `systemctl --user status outline-ss@default.service`
-- **Firefox proxy not applying**: Firefox must be restarted; the script only writes `user.js`
+- **Firefox proxy not applying**: Firefox must be restarted if it was running
+  when the proxy was configured. The script sets proxy in `prefs.js` directly
+  (after nuking any stale `user.js` override files).
 - **KDE proxy not taking effect**: `kded6` sometimes needs `kquitapp5 kded5 && kded6 &`
