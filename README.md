@@ -62,8 +62,8 @@ Add Widgets → search "Outline").
 ### What install.sh does
 
 1. Copies `outline-ss` and `configure-firefox-proxy` to `~/.local/bin/`
-2. Installs the `outline-ss@.service` systemd user unit
-3. Reloads systemd user daemon
+2. Installs the `outline-ss@.service` systemd user unit + reloads daemon
+3. Cleans up any stale proxy state from previous (possibly broken) installations
 4. Installs the plasmoid to `~/.local/share/plasma/plasmoids/`
 5. Restarts the Plasma shell (if running)
 
@@ -132,8 +132,8 @@ outline-plasmoid/
 │           ├── config.qml
 │           └── main.xml                # Plasmoid config schema
 ├── cli/
-│   ├── outline-ss                      # Python CLI (connect/disconnect/status)
-│   └── configure-firefox-proxy         # Firefox SOCKS5 configuration
+│   ├── outline-ss                      # Python CLI (connect/disconnect/status/cleanup/recover)
+│   └── configure-firefox-proxy         # Firefox SOCKS5 (set/clear/status for ALL profiles)
 └── systemd/
     └── outline-ss@.service             # systemd user unit template
 ```

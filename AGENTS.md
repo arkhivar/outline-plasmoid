@@ -102,6 +102,18 @@ Manual testing workflow:
 5. Click to disconnect, verify port is freed
 6. Test `outline-ss status` from terminal
 
+**Recovery / safety flow:**
+7. Connect, then `pkill -9 sslocal` (simulate crash)
+8. Verify browsers break (they will — proxy settings point to dead port)
+9. Run `outline-ss recover`
+10. If still broken: `systemctl --user restart xdg-desktop-portal.service`
+11. Verify browsers work again
+
+**Proxy configurator:**
+12. `configure-firefox-proxy status` — should list all Firefox profiles
+13. `configure-firefox-proxy` — sets SOCKS5 on all profiles via prefs.js
+14. `configure-firefox-proxy clear` — disables proxy on all profiles
+
 ## Common issues
 
 - **sslocal not found**: install shadowsocks-rust (`cargo install shadowsocks-rust` or COPR)
