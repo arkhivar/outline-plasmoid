@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import ssl
 import subprocess
 import sys
@@ -246,7 +247,7 @@ def _set_kde_proxy(host="127.0.0.1", port=1080):
               "--key", "httpsProxy", f"socks5://{host}:{port}"], check=True)
         # Set proxy type to manual (0=none, 1=manual, 2=env, 3=PAC)
         _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings",
-              "--key", "ProxyType", "1"], check=True)
+              "--key", "ProxyType", "--type", "int", "1"], check=True)
         # Signal KDE to reload config
         _run(["dbus-send", "--session", "--dest=org.kde.kded6",
               "/kded", "org.kde.kded6.reconfigure"], check=False)
@@ -262,7 +263,7 @@ def _clear_kde_proxy():
     try:
         # Disable proxy (set to none)
         _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings",
-              "--key", "ProxyType", "0"], check=False)
+              "--key", "ProxyType", "--type", "int", "0"], check=False)
         # Remove proxy entries
         _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings",
               "--key", "socksProxy", "--delete"], check=False)
@@ -322,7 +323,6 @@ def cmd_connect(url: str, profile: str = DEFAULT_PROFILE, local_port: int = DEFA
         _set_kde_proxy("127.0.0.1", local_port)
 
         # Configure Firefox proxy
-        import shutil
         ff_proxy = shutil.which("configure-firefox-proxy")
         if ff_proxy:
             _run([ff_proxy], check=False)
@@ -354,12 +354,11 @@ def cmd_disconnect(profile: str = DEFAULT_PROFILE):
 
 def cmd_cleanup(profile: str = DEFAULT_PROFILE):
     """Clean up proxy settings (for ExecStopPost hook or manual recovery)."""
-    import subprocess as sp
     try:
         _clear_kde_proxy()
         ff_proxy = shutil.which("configure-firefox-proxy")
         if ff_proxy:
-            sp.run([ff_proxy, "clear"], check=False)
+            subprocess.run([ff_proxy, "clear"], check=False)
         print("ok")
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
@@ -368,22 +367,20 @@ def cmd_cleanup(profile: str = DEFAULT_PROFILE):
 
 def cmd_recover():
     """Emergency: purge ALL proxy settings and Firefox user.js overrides."""
-    import subprocess as sp
     print("Emergency recovery: purging ALL Outline proxy residues...", file=sys.stderr)
     _clear_kde_proxy()
     ff_proxy = shutil.which("configure-firefox-proxy")
     if ff_proxy:
-        sp.run([ff_proxy, "clear"], check=False)
+        subprocess.run([ff_proxy, "clear"], check=False)
     print("ok", file=sys.stderr)
 
 
 def _cleanup_proxy():
     """Full proxy cleanup: KDE + Firefox."""
-    import subprocess as sp
     _clear_kde_proxy()
     ff_proxy = shutil.which("configure-firefox-proxy")
     if ff_proxy:
-        sp.run([ff_proxy, "clear"], check=False)
+        subprocess.run([ff_proxy, "clear"], check=False)
 
 
 def cmd_status(profile: str = DEFAULT_PROFILE):
