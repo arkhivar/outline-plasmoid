@@ -1,0 +1,13 @@
+[Unit]
+Description=Outline Shadowsocks Client (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sslocal -c %h/.config/systemd/user/outline-ss@%i.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

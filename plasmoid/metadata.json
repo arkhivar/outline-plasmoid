@@ -1,0 +1,22 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Name": "Outline SS",
+        "Name[zh_CN]": "Outline SS",
+        "Description": "Connect to Outline VPN via Shadowsocks proxy",
+        "Description[zh_CN]": "通过 Shadowsocks 代理连接到 Outline VPN",
+        "Icon": "network-vpn",
+        "Category": "System",
+        "Version": "1.0",
+        "EnabledByDefault": true,
+        "License": "MIT",
+        "Id": "org.kde.plasma.outline-ss"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-API": "declarativeappletscript",
+    "X-Plasma-MainScript": "ui/main.qml",
+    "X-KDE-ServiceTypes": "Plasma/Applet",
+    "X-Plasma-Provides": "org.kde.plasma.outline-ss",
+    "X-Plasma-NotificationArea": "true",
+    "X-Plasma-NotificationAreaCategory": "SystemServices"
+}

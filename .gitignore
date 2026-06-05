@@ -1,0 +1,17 @@
+# Shadowsocks config files (contain passwords)
+*.conf
+!systemd/outline-ss@.service
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
