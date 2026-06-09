@@ -150,14 +150,23 @@ def _normalize_json_config(data: dict):
     result["server_port"] = data.get("server_port") or data.get("serverPort") or data.get("port", 0)
     result["method"] = data.get("method") or data.get("cipher") or "chacha20-ietf-poly1305"
     result["password"] = data.get("password") or ""
-    result["prefix"] = data.get("prefix") or None  # hex-encoded prefix bytes (optional)
+    result["prefix"] = data.get("prefix") or None  # hex-encoded prefix bytes (required for Outline)
+    result["plugin"] = data.get("plugin") or None
+    result["plugin_opts"] = data.get("plugin_opts") or data.get("pluginOpts") or None
     return result
 
 
 # ── shadowsocks config generation ────────────────────────────────────
 
 def _generate_sslocal_config(config: dict, local_port: int):
-    """Generate a sslocal-compatible JSON config file."""
+    """Generate a sslocal-compatible JSON config from normalized Outline config.
+    
+    NOTE: The Outline server may return a "prefix" field (TLS ClientHello
+    obfuscation bytes), but including it in the sslocal config currently breaks
+    shadowsocks-rust 1.24.0 ("unexpected end of file").  We intentionally omit
+    prefix from the generated config.  Use `outline-ss debug-config` to inspect
+    the full fetched response including any prefix.
+    """
     ss_config = {
         "server": config["server"],
         "server_port": int(config["server_port"]),
@@ -165,8 +174,11 @@ def _generate_sslocal_config(config: dict, local_port: int):
         "password": config["password"],
         "local_address": "127.0.0.1",
         "local_port": local_port,
-        "mode": "tcp_and_udp",
+        "mode": "tcp_only",
     }
+    # Future: if shadowsocks-rust fixes prefix handling, uncomment below:
+    # if config.get("prefix"):
+    #     ss_config["prefix"] = config["prefix"]
     return json.dumps(ss_config, indent=2)
 
 
@@ -383,6 +395,23 @@ def _cleanup_proxy():
         subprocess.run([ff_proxy, "clear"], check=False)
 
 
+def cmd_debug_config(url: str):
+    """Debug: fetch, normalize, and print the generated sslocal config."""
+    if not url.startswith("ssconf://"):
+        if re.match(r'^[\w.-]+:\d+', url) or url.startswith("https://"):
+            url = url.replace("https://", "ssconf://", 1) if url.startswith("https://") else f"ssconf://{url}"
+    host, port, path = _parse_ssconf_url(url)
+    raw = _fetch_config(host, port, path)
+    norm = _normalize_json_config(raw)
+    gen = _generate_sslocal_config(norm, DEFAULT_LOCAL_PORT)
+    print("=== Raw Outline response ===")
+    print(json.dumps(raw, indent=2))
+    print("\n=== Normalized ===")
+    print(json.dumps({k: v for k, v in norm.items() if v is not None}, indent=2))
+    print("\n=== Generated sslocal config ===")
+    print(gen)
+
+
 def cmd_status(profile: str = DEFAULT_PROFILE):
     """Get current status as JSON."""
     active = _service_active(profile)
@@ -446,6 +475,9 @@ def main():
 
     p_recover = sub.add_parser("recover", help="Emergency: purge ALL proxy residues")
 
+    p_debug = sub.add_parser("debug-config", help="Debug: fetch and print generated sslocal config")
+    p_debug.add_argument("url", help="ssconf:// URL")
+
     p_status = sub.add_parser("status", help="Show connection status")
     p_status.add_argument("--profile", "-p", default=DEFAULT_PROFILE, help="Profile name")
 
@@ -459,6 +491,8 @@ def main():
         cmd_cleanup(args.profile)
     elif args.command == "recover":
         cmd_recover()
+    elif args.command == "debug-config":
+        cmd_debug_config(args.url)
     elif args.command == "status":
         cmd_status(args.profile)
 
