@@ -78,6 +78,11 @@ Certificate verification is skipped by default (Outline servers often use
 self-signed certs). Users can enable it by placing a CA bundle at
 `~/.config/outline-ss/ca-bundle.crt`.
 
+**Prefix handling**: The Outline API may return a `prefix` field (TLS ClientHello
+bytes for DPI obfuscation). This is preserved in `_normalize_json_config()` for
+`debug-config` output, but excluded from the generated sslocal config because it
+breaks shadowsocks-rust ≥1.24.0 ("unexpected end of file"). The proxy works without it.
+
 ## Build / deploy
 
 No build step. The plasmoid is interpreted QML. Installation is file copies:

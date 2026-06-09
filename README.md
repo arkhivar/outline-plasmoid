@@ -147,6 +147,26 @@ outline-plasmoid/
 | `$XDG_RUNTIME_DIR/outline-ss/status-profile.json` | Connection status cache |
 | `~/.config/outline-ss/ca-bundle.crt` | Optional custom CA cert for Outline server |
 
+## Known limitations
+
+### Prefix obfuscation
+
+The Outline API returns a `prefix` field (TLS ClientHello header bytes) for DPI
+obfuscation. **This field is intentionally excluded from the generated sslocal
+config** because it causes shadowsocks-rust ≥1.24.0 to fail with
+"unexpected end of file".
+
+The proxy tunnels successfully without it, and `outline-ss debug-config` shows
+the full API response including the prefix for inspection. If shadowsocks-rust
+adds prefix support in a future release, the generator can be updated to
+include it.
+
+### UDP not enabled
+
+The generated config uses `mode: "tcp_only"`. Shadowsocks UDP relay caused
+connection instability in testing. Most web traffic (HTTP/HTTPS) works fine
+over TCP.
+
 ## Security
 
 - The Shadowsocks password is stored in `~/.config/systemd/user/` with `0600`
