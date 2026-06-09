@@ -263,8 +263,9 @@ def _set_kde_proxy(host="127.0.0.1", port=1080):
         # Signal KDE to reload config
         _run(["dbus-send", "--session", "--dest=org.kde.kded6",
               "/kded", "org.kde.kded6.reconfigure"], check=False)
-        # Try kded6 reconfigure via qdbus if dbus-send fails
-        _run(["qdbus", "org.kde.kded6", "/modules/proxyscout", "reload"], check=False)
+        # Try kded6 reconfigure via qdbus (qdbus-qt6 on Fedora, qdbus elsewhere)
+        qdbus_bin = shutil.which("qdbus-qt6") or "qdbus"
+        _run([qdbus_bin, "org.kde.kded6", "/modules/proxyscout", "reload"], check=False)
         sys.stderr.write(f"✓ System proxy set to {host}:{port}\n")
     except Exception as e:
         sys.stderr.write(f"Warning: failed to set KDE proxy: {e}\n")
