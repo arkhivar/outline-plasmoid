@@ -63,6 +63,8 @@ def _set_prefs_js_proxy(profile, socks_host="127.0.0.1", socks_port=1080):
     seen_no_proxies = False
     seen_tls = False
     seen_remote_dns = False
+    seen_conn_per_proxy = False
+    seen_conn_per_server = False
 
     for line in lines:
         s = line.strip()
@@ -84,6 +86,12 @@ def _set_prefs_js_proxy(profile, socks_host="127.0.0.1", socks_port=1080):
         elif 'network.proxy.socks_remote_dns' in s:
             new_lines.append('user_pref("network.proxy.socks_remote_dns", true);\n')
             seen_remote_dns = True
+        elif 'network.http.max-persistent-connections-per-proxy' in s:
+            new_lines.append('user_pref("network.http.max-persistent-connections-per-proxy", 4);\n')
+            seen_conn_per_proxy = True
+        elif 'network.http.max-connections-per-server' in s:
+            new_lines.append('user_pref("network.http.max-connections-per-server", 2);\n')
+            seen_conn_per_server = True
         else:
             new_lines.append(line)
 
@@ -99,6 +107,10 @@ def _set_prefs_js_proxy(profile, socks_host="127.0.0.1", socks_port=1080):
         new_lines.append('user_pref("network.proxy.proxy_over_tls", false);\n')
     if not seen_remote_dns:
         new_lines.append('user_pref("network.proxy.socks_remote_dns", true);\n')
+    if not seen_conn_per_proxy:
+        new_lines.append('user_pref("network.http.max-persistent-connections-per-proxy", 4);\n')
+    if not seen_conn_per_server:
+        new_lines.append('user_pref("network.http.max-connections-per-server", 2);\n')
 
     prefs.write_text("".join(new_lines), encoding="utf-8")
     return True
@@ -126,6 +138,10 @@ def _clear_prefs_js_proxy(profile):
             new_lines.append('user_pref("network.proxy.proxy_over_tls", false);\n')
         elif 'network.proxy.socks_remote_dns' in s:
             new_lines.append('user_pref("network.proxy.socks_remote_dns", false);\n')
+        elif 'network.http.max-persistent-connections-per-proxy' in s:
+            new_lines.append('user_pref("network.http.max-persistent-connections-per-proxy", 32);\n')
+        elif 'network.http.max-connections-per-server' in s:
+            new_lines.append('user_pref("network.http.max-connections-per-server", 900);\n')
         else:
             new_lines.append(line)
     prefs.write_text("".join(new_lines), encoding="utf-8")
