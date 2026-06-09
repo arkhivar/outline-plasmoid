@@ -194,17 +194,17 @@ def clear_firefox_proxy():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "clear":
-            clear_firefox_proxy()
-        elif sys.argv[1] == "status":
-            profiles = _find_firefox_profiles()
-            print(json.dumps({
-                "profile_count": len(profiles),
-                "profiles": [str(p.name) for p in profiles]
-            }))
-        else:
-            print(f"Unknown command: {sys.argv[1]}")
-            print("Usage: configure-firefox-proxy [clear|status]")
+    import argparse
+    ap = argparse.ArgumentParser(description="Configure Firefox SOCKS5 proxy")
+    ap.add_argument("--port", type=int, default=1080, help="SOCKS5 port (default 1080)")
+    ap.add_argument("--host", default="127.0.0.1", help="SOCKS5 host")
+    ap.add_argument("command", nargs="?", default="set", choices=["set", "clear", "status"])
+    args = ap.parse_args()
+
+    if args.command == "clear":
+        clear_firefox_proxy()
+    elif args.command == "status":
+        profiles = _find_firefox_profiles()
+        print(json.dumps({"profile_count": len(profiles), "profiles": [str(p.name) for p in profiles]}))
     else:
-        set_firefox_proxy()
+        set_firefox_proxy(args.host, args.port)

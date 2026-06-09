@@ -18,7 +18,7 @@ echo ""
 echo "── Installing CLI scripts to $BIN_DIR"
 mkdir -p "$BIN_DIR"
 
-for script in outline-ss configure-firefox-proxy; do
+for script in outline-ss configure-firefox-proxy outline-ss-pool; do
     cp "$SCRIPT_DIR/cli/$script" "$BIN_DIR/$script"
     chmod +x "$BIN_DIR/$script"
     echo "   ✓ $script"

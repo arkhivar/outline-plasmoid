@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""SOCKS5 connection-pool proxy for sslocal (Outline).
+
+The Outline server limits TCP connections per client IP (observed: 2),
+counting ESTAB + FIN-WAIT-1 + TIME-WAIT.  Browsers open 6-8 parallel
+connections and overwhelm this limit.
+
+This proxy serialises upstream connections to stay within the limit,
+queuing excess browser requests until a slot + cooldown is available.
+
+Usage:
+    outline-ss-pool [--listen 1081] [--upstream 1080] [--max-conn 2] [--cooldown 11]
+"""
+
+import argparse
+import asyncio
+import contextlib
+import logging
+import socket
+import struct
+import time
+
+log = logging.getLogger("outline-ss-pool")
+
+SOCKS5_VER = 0x05
+SOCKS5_CMD_CONNECT = 0x01
+SOCKS5_ATYP_IPV4 = 0x01
+SOCKS5_ATYP_DOMAIN = 0x03
+SOCKS5_ATYP_IPV6 = 0x04
+SOCKS5_REP_SUCCESS = 0x00
+SOCKS5_REP_GENERAL = 0x01
+
+
+def _encode_dst(addr: str, port: int) -> bytes:
+    try:
+        ip = socket.inet_pton(socket.AF_INET, addr)
+        return bytes([SOCKS5_ATYP_IPV4]) + ip + struct.pack("!H", port)
+    except OSError:
+        pass
+    try:
+        ip = socket.inet_pton(socket.AF_INET6, addr)
+        return bytes([SOCKS5_ATYP_IPV6]) + ip + struct.pack("!H", port)
+    except OSError:
+        pass
+    domain = addr.encode()
+    return bytes([SOCKS5_ATYP_DOMAIN, len(domain)]) + domain + struct.pack("!H", port)
+
+
+async def _socks5_handshake(reader, writer, dst_addr: str, dst_port: int) -> bool:
+    writer.write(b"\x05\x01\x00")
+    await writer.drain()
+    if await reader.readexactly(2) != b"\x05\x00":
+        return False
+    req = bytes([SOCKS5_VER, SOCKS5_CMD_CONNECT, 0x00]) + _encode_dst(dst_addr, dst_port)
+    writer.write(req)
+    await writer.drain()
+    reply = await reader.readexactly(4)
+    if reply[1] != SOCKS5_REP_SUCCESS:
+        return False
+    atyp = reply[3]
+    if atyp == SOCKS5_ATYP_IPV4:
+        await reader.readexactly(6)
+    elif atyp == SOCKS5_ATYP_DOMAIN:
+        length = (await reader.readexactly(1))[0]
+        await reader.readexactly(length + 2)
+    elif atyp == SOCKS5_ATYP_IPV6:
+        await reader.readexactly(18)
+    return True
+
+
+class TokenBucket:
+    """Rate-limits new upstream connections: *burst* openings allowed,
+    then one opening per *interval* seconds thereafter.  This naturally
+    respects the server's connection limit + FIN-WAIT-1 expiry."""
+
+    def __init__(self, burst: int, interval: float):
+        self._burst = burst
+        self._interval = interval
+        self._tokens = float(burst)
+        self._last = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self):
+        async with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last
+            self._tokens = min(float(self._burst), self._tokens + elapsed / self._interval)
+            self._last = now
+
+            while self._tokens < 1.0:
+                wait = (1.0 - self._tokens) * self._interval
+                log.debug("TokenBucket: waiting %.1fs (tokens=%.2f)", wait, self._tokens)
+                await asyncio.sleep(wait)
+                now = time.monotonic()
+                elapsed = now - self._last
+                self._tokens = min(float(self._burst), self._tokens + elapsed / self._interval)
+                self._last = now
+
+            self._tokens -= 1.0
+
+
+class ConnectionPool:
+    def __init__(self, upstream_host: str, upstream_port: int,
+                 max_conn: int, cooldown: float):
+        self._host = upstream_host
+        self._port = upstream_port
+        # Token bucket: burst = max_conn (open connections immediately),
+        # then 1 per cooldown seconds (wait for FIN-WAIT-1 to expire).
+        self._bucket = TokenBucket(burst=max_conn, interval=cooldown)
+        self._active = 0
+        self._max = max_conn
+        self._active_cond = asyncio.Condition()
+
+    @contextlib.asynccontextmanager
+    async def acquire(self, dst_addr: str, dst_port: int):
+        # Wait for an active-connection slot AND increment immediately
+        async with self._active_cond:
+            await self._active_cond.wait_for(lambda: self._active < self._max)
+            self._active += 1
+
+        # Wait for rate-limit token (connection-open-permission)
+        await self._bucket.acquire()
+
+        try:
+            reader, writer = await asyncio.open_connection(self._host, self._port)
+            ok = await _socks5_handshake(reader, writer, dst_addr, dst_port)
+            if not ok:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+                raise ConnectionError(
+                    f"SOCKS5 upstream connect to {dst_addr}:{dst_port} failed")
+            try:
+                yield reader, writer
+            finally:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+        finally:
+            self._active -= 1
+            async with self._active_cond:
+                self._active_cond.notify_all()
+
+
+async def _relay(src_r, src_w, dst_r, dst_w):
+    async def _pipe(r, w):
+        try:
+            while True:
+                data = await r.read(65536)
+                if not data:
+                    break
+                w.write(data)
+                await w.drain()
+        except (ConnectionError, asyncio.IncompleteReadError, OSError):
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                w.close()
+    await asyncio.gather(_pipe(src_r, dst_w), _pipe(dst_r, src_w))
+
+
+async def _downstream_handshake(reader, writer) -> tuple[str, int] | None:
+    ver = await reader.readexactly(1)
+    if ver[0] != SOCKS5_VER:
+        return None
+    nmethods = (await reader.readexactly(1))[0]
+    await reader.readexactly(nmethods)
+    writer.write(b"\x05\x00")
+    await writer.drain()
+    req = await reader.readexactly(4)
+    if req[0] != SOCKS5_VER or req[1] != SOCKS5_CMD_CONNECT:
+        return None
+    atyp = req[3]
+    if atyp == SOCKS5_ATYP_IPV4:
+        addr = socket.inet_ntop(socket.AF_INET, await reader.readexactly(4))
+    elif atyp == SOCKS5_ATYP_DOMAIN:
+        length = (await reader.readexactly(1))[0]
+        addr = (await reader.readexactly(length)).decode()
+    elif atyp == SOCKS5_ATYP_IPV6:
+        addr = socket.inet_ntop(socket.AF_INET6, await reader.readexactly(16))
+    else:
+        return None
+    port = struct.unpack("!H", await reader.readexactly(2))[0]
+    return addr, port
+
+
+def _socks5_reply(writer, success: bool) -> None:
+    rep = SOCKS5_REP_SUCCESS if success else SOCKS5_REP_GENERAL
+    writer.write(bytes([SOCKS5_VER, rep, 0x00, SOCKS5_ATYP_IPV4, 0, 0, 0, 0, 0, 0]))
+
+
+async def _handle_client(reader, writer, pool: ConnectionPool):
+    dst = await _downstream_handshake(reader, writer)
+    if dst is None:
+        writer.close()
+        return
+    dst_addr, dst_port = dst
+    log.info("CONNECT %s:%d", dst_addr, dst_port)
+
+    try:
+        async with pool.acquire(dst_addr, dst_port) as (up_r, up_w):
+            _socks5_reply(writer, success=True)
+            try:
+                await writer.drain()
+            except OSError:
+                return
+            await _relay(reader, writer, up_r, up_w)
+    except ConnectionError as e:
+        log.warning("Upstream failed: %s", e)
+        try:
+            _socks5_reply(writer, success=False)
+            await writer.drain()
+        except OSError:
+            pass
+    finally:
+        with contextlib.suppress(OSError):
+            writer.close()
+
+
+async def main():
+    parser = argparse.ArgumentParser(description="SOCKS5 connection pool for sslocal")
+    parser.add_argument("--listen", default="127.0.0.1:1081")
+    parser.add_argument("--upstream", default="127.0.0.1:1080")
+    parser.add_argument("--max-conn", type=int, default=2)
+    parser.add_argument("--cooldown", type=float, default=11.0,
+                        help="Seconds between new upstream connections (default 11)")
+    parser.add_argument("--log-level", default="INFO")
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+    l_host, l_port = args.listen.rsplit(":", 1)
+    u_host, u_port = args.upstream.rsplit(":", 1)
+    l_port, u_port = int(l_port), int(u_port)
+
+    pool = ConnectionPool(u_host, u_port, args.max_conn, args.cooldown)
+
+    server = await asyncio.start_server(
+        lambda r, w: _handle_client(r, w, pool),
+        host=l_host, port=l_port,
+    )
+    log.info("Listening on %s:%d → %s:%d (max %d conns, %.0fs cooldown)",
+             l_host, l_port, u_host, u_port, args.max_conn, args.cooldown)
+
+    async with server:
+        await server.serve_forever()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
