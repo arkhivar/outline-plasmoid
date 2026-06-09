@@ -128,7 +128,7 @@ PlasmoidItem {
                 root.errorMessage = s.error || ""
             } catch(e) {
                 // Command not found or not running — treat as disconnected
-                root.outlineStatus = "disconnected"
+                // Status handled by data source after cleanup
             }
         }
     }
@@ -172,10 +172,9 @@ PlasmoidItem {
 
     function doDisconnect() {
         var profile = plasmoid.configuration.profile || "default"
-        root.outlineStatus = "disconnected"
-        actionSource.connectSource(
-            "outline-ss disconnect" +
-            " --profile " + profile
-        )
+        // Defense in depth: clear proxy FIRST in case service is already dead/crashed
+        actionSource.connectSource("outline-ss cleanup --profile " + profile)
+        // Then stop the service (will also trigger ExecStopPost, which is idempotent)
+        actionSource.connectSource("outline-ss disconnect --profile " + profile)
     }
 }
