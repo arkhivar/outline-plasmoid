@@ -16,6 +16,10 @@ Shadowsocks connections on Linux, using systemd user services for lifecycle.
 ```
 outline-plasmoid/
 ├── install.sh                  # bash installer — copies files, reloads plasma
+├── uninstall.sh
+├── README.md
+├── AGENTS.md                   # This file
+├── _PROBLEMS.md                # Diagnostic log: every hurdle + fix, session knowledge
 ├── plasmoid/                   # KDE Plasma widget
 │   ├── metadata.json           # Plasma plugin metadata
 │   └── contents/
@@ -28,6 +32,7 @@ outline-plasmoid/
 │           └── main.xml        # Persistent config schema (ssconf_url, local_port)
 ├── cli/
 │   ├── outline-ss              # Python CLI: connect/disconnect/status/cleanup/recover
+│   ├── outline-ss-pool         # Connection-pooling SOCKS5 proxy (token-bucket rate limiter)
 │   └── configure-firefox-proxy # Python: sets/clears Firefox SOCKS5 on ALL profiles
 └── systemd/
 │   └── outline-ss@.service     # systemd user unit (ExecStopPost → outline-ss cleanup)
@@ -45,8 +50,8 @@ outline-plasmoid/
    directly — it calls `outline-ss connect/disconnect/status` via
    `PlasmaCore.DataSource` with `engine: "executable"`.
 
-4. **systemd is the source of truth for connection state.** The plasmoid
-   polls `outline-ss status` which checks `systemctl --user is-active`.
+4. **PID files are the source of truth for connection state.** The plasmoid
+   polls `outline-ss status` which checks PID files in `XDG_RUNTIME_DIR`.
 
 5. **Fedora/ARM64 first.** Paths, package names, and assumptions should
    target Fedora Linux on aarch64. Add guards for other distros if needed.
@@ -65,27 +70,21 @@ outline-plasmoid/
 
 `outline-ss` is a single-file Python 3 script (zero dependencies beyond stdlib):
 
-- `connect` → resolve `ssconf://` URL over HTTPS, parse JSON/YAML config,
-  write to `~/.config/systemd/user/outline-ss@<profile>.conf` with `0600`,
-  start `systemctl --user start outline-ss@<profile>.service`
-- `disconnect` → `systemctl --user stop ...`, clear KDE + Firefox proxy
-- `cleanup` → clear KDE + Firefox proxy without touching service (ExecStopPost hook)
-- `recover` → emergency: purge ALL proxy residues (KDE, Firefox, desktop portal)
-- `status` → JSON output: `{"status": "connected", "server": "...", ...}`
+- `connect` → resolve `ssconf://` URL over HTTPS, parse JSON config,
+  write config to `~/.config/outline-ss/outline-ss@<profile>.conf` with `0600`,
+  start `sslocal` directly (PID-file managed, no systemd),
+  start `outline-ss-pool` on port 1081 (token-bucket rate limiter),
+  configure KDE + Firefox to use 127.0.0.1:1081
+- `disconnect` → stop pool, stop sslocal, clear KDE + Firefox proxy via `configure-firefox-proxy`
+- `recover` → emergency: stop pool+sslocal, purge ALL proxy residues (KDE, Firefox)
+- `status` → JSON output: `{"status": "connected", "server": "...", "pool_running": true, ...}`
 
-The `ssconf://` protocol requires HTTPS to the Outline management API.
-Certificate verification is skipped by default (Outline servers often use
-self-signed certs). Users can enable it by placing a CA bundle at
-`~/.config/outline-ss/ca-bundle.crt`.
+`outline-ss-pool` is a separate Python 3 script (also zero deps beyond stdlib):
 
-**Backend model**: `outline-ss` now generates a backend config and launches a
-local transport backend chosen via `OUTLINE_SS_BACKEND`, `backend.env`, or
-autodetection. Prefer the official Outline local backend (`outline-local`) on
-Linux; `sslocal` is retained only as a fallback.
-
-**Prefix handling**: The Outline API may return a `prefix` field (TLS ClientHello
-bytes for DPI obfuscation). This is preserved in `_normalize_json_config()` and
-passed through to the generated backend config so compatible backends can use it.
+- SOCKS5 proxy listening on 127.0.0.1:1081, forwarding to sslocal on 127.0.0.1:1080
+- Token-bucket rate limiting (burst=2, refill=1/11s) + semaphore (max 2 concurrent upstream connections)
+- Prevents the browser from overwhelming the Outline server's 2-connection TCP limit
+- See `_PROBLEMS.md` §6–7 for rationale and limitations
 
 
 ## Build / deploy

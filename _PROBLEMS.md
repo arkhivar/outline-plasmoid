@@ -102,28 +102,25 @@ PID file (`/run/user/$UID/outline-ss/pid-default`).  systemd unit kept for
 
 ---
 
-## 7. Browser still fails for heavy sites (YouTube, Instagram) — IN PROGRESS
+## 7. Browser still fails for heavy sites (YouTube, Instagram) — KNOWN LIMITATION
 
 **Symptom**: Pool proxy (1081) works perfectly with `curl` — all requests
 succeed with proper rate-limiting.  But when Firefox connects through the pool,
 Russian sites work while YouTube/Instagram time out.
 
-**Hypothesis** (untested): Browsers open connections to 6–12 different hosts
+**Root cause confirmed**: Browsers open connections to 6–12 different hosts
 simultaneously (youtube.com, googlevideo.com, googleapis.com, …).  The pool
-has only 2 concurrent slots.  By the time the 3rd host gets a slot (11s later),
-browser-side timeouts have already fired, and the page load is aborted.
+has only 2 concurrent slots with 11s token refill.  By the time the 3rd host
+gets a slot, browser-side timeouts have already fired, and the page load is
+aborted.  Firefox connection-limiting prefs (`max-connections-per-server=2`,
+`max-persistent-connections-per-proxy=4`) help but can't overcome the
+fundamental 2-slot bottleneck.
 
-**Possible fixes to try next**:
-1. **Test per-host connection limit**: does the server count 2 connections per
-   *target host* or 2 per *client IP total*?  If per-host, increase pool max_conn.
-2. **HTTP/1.1 keep-alive**: ensure Firefox reuses SOCKS5 connections for
-   multiple requests to the same host (should already work with HTTPS CONNECT).
-3. **Increase pool burst**: try burst=4, cooldown=5s to see if server tolerates
-   more connections.
-4. **Alternative transport**: try `v2ray`/`xray` with mux.cool (connection
-   multiplexing) which can send multiple streams over a single TCP connection.
-5. **SSH `-D`**: if the Outline server supports SSH tunneling (unlikely), use
-   SSH's SOCKS5 which multiplexes natively.
+**Short-term mitigations tested**:
+- Firefox `max-connections-per-server=2`, `max-persistent-connections-per-proxy=4` — partial improvement, not sufficient
+- Token bucket tuning (burst=4, cooldown=2s) — might work for lighter sites, still fragile
+
+**Proper fix → see #10 below**.
 
 ---
 
@@ -203,3 +200,84 @@ ss -tnp | grep sslocal | grep 194.247 | awk '{print $1}' | sort | uniq -c
 outline-ss disconnect
 pkill -9 sslocal outline-ss-pool
 ```
+
+---
+
+## 10. Proposed long-term fix: v2ray/Xray with mux.cool
+
+**Why**: The 2-connection server limit is fundamental — no amount of client-side
+pool tuning can make modern web browsing comfortable when the browser needs to
+connect to 6+ hosts simultaneously. We need **connection multiplexing**: all
+traffic multiplexed over a single TCP connection to the server.
+
+**Approach**: Replace `sslocal` with `v2ray` or `xray` configured with Shadowsocks
+inbound and `mux.cool` multiplexing.  Xray is preferred (active fork, better
+performance, actively maintained).
+
+```
+  Firefox / Vivaldi
+        │
+        ▼
+  outline-ss-pool  (127.0.0.1:1081)   ← token bucket (short cooldown)
+        │
+        ▼
+  xray             (127.0.0.1:1080)   ← inbound: SOCKS5 + mux.cool
+        │                                 outbound: Shadowsocks w/ prefix
+        ▼
+  Outline server   (194.247.182.162:24631)
+```
+
+**Key config (Xray)**:
+```json
+{
+  "inbounds": [{
+    "port": 1080,
+    "protocol": "socks",
+    "settings": { "auth": "noauth", "udp": false },
+    "streamSettings": { "sockopt": { "tcpMptcp": false } }
+  }],
+  "outbounds": [{
+    "protocol": "shadowsocks",
+    "settings": {
+      "servers": [{
+        "address": "194.247.182.162", "port": 24631,
+        "method": "2022-blake3-aes-128-gcm",
+        "password": "<password>"
+      }]
+    },
+    "streamSettings": {
+      "network": "tcp",
+      "tcpSettings": { "header": { "type": "none" } },
+      "sockopt": {
+        "tcpFastOpen": true,
+        "tcpKeepAliveInterval": 30
+      }
+    },
+    "mux": {
+      "enabled": true,
+      "concurrency": 8
+    }
+  }]
+}
+```
+
+**Benefits**:
+- `mux.concurrency=8` → up to 8 browser connections multiplexed over 1 TCP
+  connection to the server → far under the 2-connection limit
+- Works with existing Outline server (Shadowsocks protocol is identical)
+- Handles prefix obfuscation via stream settings
+- Mature, well-tested, widely used in censorship-circumvention
+
+**Challenges / unknowns**:
+- Xray needs to be installed (`dnf install xray` or binary from GitHub)
+- Outline server may enforce additional protocol-level constraints beyond
+  plain Shadowsocks — needs testing
+- Prefix bytes: verify Xray can reproduce the exact ClientHello prefix the
+  Outline server expects
+- Connection lifecycle: the pool proxy may become unnecessary if Xray handles
+  multiplexing, or it may still be useful as a rate-limiting safety net
+- Package availability: Xray is not in Fedora repos; binary distribution from
+  GitHub or a COPR must be set up
+
+**Priority**: High.  This is the next session's first task.  The pool proxy is
+a valiant stopgap but the 2-slot bottleneck makes real browsing impossible.

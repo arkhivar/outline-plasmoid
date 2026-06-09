@@ -11,9 +11,8 @@ with one click from your panel.
 Click to connect. Click to disconnect. That's it.
 
 The plasmoid talks to a local [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust)
-client managed by **systemd user services**, so disconnection is graceful and
-the proxy survives logout if needed. It also configures your KDE system proxy
-and Firefox profiles automatically.
+client with direct process management (PID files), so disconnection is graceful.
+It also configures your KDE system proxy and Firefox profiles automatically.
 
 ### Architecture
 
@@ -26,15 +25,21 @@ and Firefox profiles automatically.
 ┌──────────────────────┐
 │  outline-ss (CLI)    │  ← Python, resolves ssconf:// URLs
 └─────────┬────────────┘
-          │ writes config to ~/.config/systemd/user/
+          │ starts sslocal + pool proxy, writes config
           ▼
 ┌──────────────────────┐
-│  systemd --user      │  ← outline-ss@profile.service
+│  outline-ss-pool     │  ← token-bucket SOCKS5 on 127.0.0.1:1081
+│  (connection pool)   │     rate-limits to 2 concurrent upstream conns
 └─────────┬────────────┘
-          │ runs
+          │ forwards (throttled)
           ▼
 ┌──────────────────────┐
 │  sslocal             │  ← shadowsocks-rust, SOCKS5 on 127.0.0.1:1080
+└─────────┬────────────┘
+          │ shadowsocks tunnel
+          ▼
+┌──────────────────────┐
+│  Outline Server      │  ← max 2 concurrent TCP connections per IP
 └──────────────────────┘
 ```
 
@@ -44,9 +49,9 @@ and Firefox profiles automatically.
 |------------------------|-------------------------|----------------------------------|
 | shadowsocks-rust       | `cargo install shadowsocks-rust` (or [RPM](https://copr.fedorainfracloud.org/coprs/atim/shadowsocks-rust/)) | SOCKS5 proxy client              |
 | python3                | `python3` (base)        | CLI script runtime               |
-| systemd                | included                | Process lifecycle management     |
 | KDE Plasma 6           | `plasma-workspace`      | Plasmoid host                    |
 | kwriteconfig6 / kded6  | `kf6-kded`              | KDE proxy configuration          |
+| Firefox or Vivaldi     | `firefox` / `vivaldi`   | Browser (prefs auto-configured)  |
 
 ## Install
 
@@ -61,9 +66,9 @@ Add Widgets → search "Outline").
 
 ### What install.sh does
 
-1. Copies `outline-ss` and `configure-firefox-proxy` to `~/.local/bin/`
+1. Copies `outline-ss`, `outline-ss-pool`, and `configure-firefox-proxy` to `~/.local/bin/`
 2. Installs the `outline-ss@.service` systemd user unit + reloads daemon
-3. Cleans up any stale proxy state from previous (possibly broken) installations
+3. Cleans up any stale proxy state from previous installations
 4. Installs the plasmoid to `~/.local/share/plasma/plasmoids/`
 5. Restarts the Plasma shell (if running)
 
@@ -100,8 +105,8 @@ The plasmoid now has three layers of defense against orphaned proxy settings:
 
 | Layer | Mechanism | Trigger |
 |-------|-----------|---------|
-| **1. Disconnect cleanup** | `outline-ss disconnect` clears KDE + Firefox proxy | Every manual disconnect |
-| **2. Systemd stop hook** | `ExecStopPost=outline-ss cleanup` in the service unit | Service stops for ANY reason (reboot, crash, manual stop) |
+| **1. Disconnect cleanup** | `outline-ss disconnect` stops pool + sslocal, clears KDE + Firefox proxy | Every manual disconnect |
+| **2. PID-file safety** | Pool and sslocal are tracked by PID files in `XDG_RUNTIME_DIR`; stale processes are killed on connect/disconnect | Re-connect or crash recovery |
 | **3. Emergency recovery** | `outline-ss recover` | Manual — run if browsers can't reach internet |
 
 **If your browsers break** (can't reach internet but `curl google.com` works):
@@ -121,6 +126,10 @@ a dead `127.0.0.1:1080` and browsers break.
 ```
 outline-plasmoid/
 ├── install.sh                          # One-command installation
+├── uninstall.sh
+├── README.md
+├── AGENTS.md                           # Agent instructions
+├── _PROBLEMS.md                        # Diagnostic log: every hurdle + fix
 ├── plasmoid/                           # KDE Plasma widget
 │   ├── metadata.json
 │   └── contents/
@@ -132,7 +141,8 @@ outline-plasmoid/
 │           ├── config.qml
 │           └── main.xml                # Plasmoid config schema
 ├── cli/
-│   ├── outline-ss                      # Python CLI (connect/disconnect/status/cleanup/recover)
+│   ├── outline-ss                      # Python CLI (connect/disconnect/status/recover)
+│   ├── outline-ss-pool                 # Connection-pooling SOCKS5 proxy (token-bucket)
 │   └── configure-firefox-proxy         # Firefox SOCKS5 (set/clear/status for ALL profiles)
 └── systemd/
     └── outline-ss@.service             # systemd user unit template
@@ -142,35 +152,39 @@ outline-plasmoid/
 
 | Path | Purpose |
 |------|---------|
-| `~/.config/systemd/user/outline-ss@profile.conf` | sslocal JSON config (0600, contains password) |
-| `~/.config/systemd/user/outline-ss@profile.service` | systemd unit (symlink to installed template) |
-| `$XDG_RUNTIME_DIR/outline-ss/status-profile.json` | Connection status cache |
-| `~/.config/outline-ss/ca-bundle.crt` | Optional custom CA cert for Outline server |
+| `~/.config/outline-ss/outline-ss@default.json` | sslocal JSON config (0600, contains password + base64 prefix) |
+| `$XDG_RUNTIME_DIR/outline-ss/sslocal-default.pid` | sslocal PID file |
+| `$XDG_RUNTIME_DIR/outline-ss/pool-default.pid` | Connection pool PID file |
 
 ## Backend
 
-`outline-ss` now supports a pluggable local backend.
+`outline-ss` uses `sslocal` (shadowsocks-rust) in JSON config mode (`-c` flag).
+The `ssconf://` URL is resolved over HTTPS, the config is parsed, and a
+JSON config file is written for sslocal.
 
-Backend detection order:
-1. `OUTLINE_SS_BACKEND` environment variable
-2. `~/.config/outline-ss/backend.env`
-3. autodetected `outline-local`
-4. fallback `sslocal`
-
-The intended long-term backend is the official Outline local client (`outline-local`),
-because the generic `sslocal` client does not reliably handle modern Outline
-transport details such as `prefix` on Linux.
+**Prefix handling**: Outline servers may return a `prefix` field (TLS ClientHello
+bytes for DPI obfuscation). The prefix is converted to base64 before being
+placed in the JSON config, because `json.dumps` Unicode escaping corrupts
+multi-byte prefix bytes (see `_PROBLEMS.md` §3).
 
 ## Known limitations
+
+### 2-connection server limit
+
+The Outline server at 194.247.182.162:24631 allows only 2 concurrent TCP
+connections per client IP. Browsers open 6–12 parallel connections, so most
+are silently dropped. A connection-pooling proxy (`outline-ss-pool`) serializes
+upstream connections with a token bucket (burst=2, refill=1/11s). This works
+for sequential `curl` requests but is **too slow for comfortable browsing** —
+sites like YouTube that pull resources from 6+ hosts time out before all slots
+are served. See `_PROBLEMS.md` §7 and §10 for the proposed long-term fix
+(v2ray/Xray with `mux.cool` connection multiplexing).
 
 ### Prefix obfuscation
 
 The Outline API returns a `prefix` field (TLS ClientHello header bytes) for DPI
-obfuscation. `outline-ss debug-config` preserves and shows this field.
-
-When using the official Outline backend, the generated config includes `prefix`.
-When falling back to generic `sslocal`, compatibility is backend-dependent and
-may still fail on Linux even with a valid key.
+obfuscation. Base64-encoding resolves a Python→JSON→Rust re-encoding corruption
+(see `_PROBLEMS.md` §3).
 
 ### UDP not enabled
 
@@ -180,16 +194,16 @@ over TCP.
 
 ## Security
 
-- The Shadowsocks password is stored in `~/.config/systemd/user/` with `0600`
-  permissions and is never committed to this repo.
+- The Shadowsocks password is stored in `~/.config/outline-ss/outline-ss@default.json`
+  with `0600` permissions and is never committed to this repo.
 - If your Outline server uses a self-signed cert, place your CA bundle at
   `~/.config/outline-ss/ca-bundle.crt` and TLS verification will be enabled.
-  Otherwise `sslocal` handles its own certificate pinning via the config hash.
+  Otherwise certificate verification is skipped by default.
 
 ## Platform
 
 Built for **Fedora Asahi Linux** (ARM64, KDE Plasma 6), but works on any
-Linux distro with Plasma 6 and systemd.
+Linux distro with Plasma 6.
 
 ## License
 
