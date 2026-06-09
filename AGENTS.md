@@ -78,10 +78,15 @@ Certificate verification is skipped by default (Outline servers often use
 self-signed certs). Users can enable it by placing a CA bundle at
 `~/.config/outline-ss/ca-bundle.crt`.
 
+**Backend model**: `outline-ss` now generates a backend config and launches a
+local transport backend chosen via `OUTLINE_SS_BACKEND`, `backend.env`, or
+autodetection. Prefer the official Outline local backend (`outline-local`) on
+Linux; `sslocal` is retained only as a fallback.
+
 **Prefix handling**: The Outline API may return a `prefix` field (TLS ClientHello
-bytes for DPI obfuscation). This is preserved in `_normalize_json_config()` for
-`debug-config` output, but excluded from the generated sslocal config because it
-breaks shadowsocks-rust ≥1.24.0 ("unexpected end of file"). The proxy works without it.
+bytes for DPI obfuscation). This is preserved in `_normalize_json_config()` and
+passed through to the generated backend config so compatible backends can use it.
+
 
 ## Build / deploy
 

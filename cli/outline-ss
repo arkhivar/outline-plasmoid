@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-outline-ss — CLI for Outline-compatible Shadowsocks client management.
+outline-ss — CLI for Outline-compatible client management.
 
 Commands:
     outline-ss connect <ssconf-url> [--profile NAME] [--local-port PORT]
@@ -9,6 +9,7 @@ Commands:
 """
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -20,25 +21,23 @@ import time
 import urllib.request
 from pathlib import Path
 
-# ── constants ────────────────────────────────────────────────��───────
 SYSTEMCTL = ["systemctl", "--user", "--no-pager"]
 SERVICE_TEMPLATE = "outline-ss@{profile}.service"
-CONF_TEMPLATE = "outline-ss@{profile}.conf"
+CONF_TEMPLATE = "outline-ss@{profile}.json"
 DEFAULT_PROFILE = "default"
 DEFAULT_LOCAL_PORT = 1080
-FETCH_TIMEOUT = 15  # seconds
+FETCH_TIMEOUT = 15
 CUSTOM_CA_BUNDLE = os.path.expanduser("~/.config/outline-ss/ca-bundle.crt")
-CONF_DIR = os.path.expanduser("~/.config/systemd/user")
+CONF_DIR = os.path.expanduser("~/.config/outline-ss")
 STATUS_DIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"), "outline-ss")
+BACKEND_ENV = "OUTLINE_SS_BACKEND"
 
-# ── helpers ──────────────────────────────────────────────────────────
 
 def _run(args, capture=True, check=False):
-    """Run a command, return stdout or raise on failure."""
     try:
         r = subprocess.run(args, capture_output=capture, text=True, timeout=30)
         if check and r.returncode != 0:
-            raise RuntimeError(r.stderr.strip() or f"exit code {r.returncode}")
+            raise RuntimeError(r.stderr.strip() or r.stdout.strip() or f"exit code {r.returncode}")
         return r.stdout.strip() if capture else ""
     except subprocess.TimeoutExpired:
         raise RuntimeError("Command timed out")
@@ -57,17 +56,7 @@ def _status_path(profile):
     return os.path.join(STATUS_DIR, f"status-{profile}.json")
 
 
-def _sanitize(obj):
-    """Remove password from dict for safe logging."""
-    d = dict(obj)
-    d.pop("password", None)
-    return d
-
-
-# ── ssconf:// resolution ─────────────────────────────────────────────
-
 def _parse_ssconf_url(url: str):
-    """Parse ssconf://host:port/path into (host, port, path)."""
     m = re.match(r'^ssconf://([^:/]+)(?::(\d+))?(/.*)?$', url)
     if not m:
         raise ValueError(f"Invalid ssconf:// URL: {url}")
@@ -78,21 +67,17 @@ def _parse_ssconf_url(url: str):
 
 
 def _create_ssl_context():
-    """Create SSL context. If user has a custom CA bundle, use it. Otherwise skip verification."""
     if os.path.isfile(CUSTOM_CA_BUNDLE):
-        ctx = ssl.create_default_context(cafile=CUSTOM_CA_BUNDLE)
-    else:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        return ssl.create_default_context(cafile=CUSTOM_CA_BUNDLE)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
     return ctx
 
 
-def _fetch_config(host: str, port: int, path: str):
-    """Fetch config from Outline server. Returns parsed dict."""
+def _fetch_raw_config(host: str, port: int, path: str):
     url = f"https://{host}:{port}{path}"
     ctx = _create_ssl_context()
-
     req = urllib.request.Request(url, headers={"User-Agent": "outline-ss/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT, context=ctx) as resp:
@@ -102,38 +87,33 @@ def _fetch_config(host: str, port: int, path: str):
     except Exception as e:
         raise RuntimeError(f"Failed to fetch {host}:{port}{path}: {e}")
 
-    # Try JSON first, then YAML
     try:
-        data = json.loads(raw)
-        return _normalize_json_config(data)
+        return json.loads(raw)
     except json.JSONDecodeError:
         pass
 
     try:
-        data = _parse_simple_yaml(raw)
-        return _normalize_json_config(data)
+        return _parse_simple_yaml(raw)
     except Exception:
         pass
 
-    raise RuntimeError(f"Could not parse config from {host}:{port}{path}. "
-                       f"Response starts with: {raw[:200]}")
+    raise RuntimeError(f"Could not parse config from {host}:{port}{path}. Response starts with: {raw[:200]}")
+
+
+def _fetch_config(host: str, port: int, path: str):
+    return _normalize_json_config(_fetch_raw_config(host, port, path))
 
 
 def _parse_simple_yaml(raw: str):
-    """Minimal YAML parser for Outline configs. Avoids PyYAML dependency."""
     result = {}
-    # Remove any leading '---'
     raw = re.sub(r'^---\s*\n', '', raw)
     for line in raw.splitlines():
         line = line.strip()
-        if not line or line.startswith('#'):
-            continue
-        if ':' not in line:
+        if not line or line.startswith('#') or ':' not in line:
             continue
         key, _, val = line.partition(':')
         key = key.strip()
         val = val.strip().strip('"').strip("'")
-        # Convert numeric values
         if val.isdigit():
             val = int(val)
         elif val.lower() in ('true', 'false'):
@@ -143,51 +123,44 @@ def _parse_simple_yaml(raw: str):
 
 
 def _normalize_json_config(data: dict):
-    """Normalize an Outline config dict into standard field names."""
-    result = {}
-    # Handle both snake_case and camelCase field names
-    result["server"] = data.get("server") or data.get("serverHost") or data.get("host", "")
-    result["server_port"] = data.get("server_port") or data.get("serverPort") or data.get("port", 0)
-    result["method"] = data.get("method") or data.get("cipher") or "chacha20-ietf-poly1305"
-    result["password"] = data.get("password") or ""
-    result["prefix"] = data.get("prefix") or None  # hex-encoded prefix bytes (required for Outline)
-    result["plugin"] = data.get("plugin") or None
-    result["plugin_opts"] = data.get("plugin_opts") or data.get("pluginOpts") or None
-    return result
+    return {
+        "server": data.get("server") or data.get("serverHost") or data.get("host", ""),
+        "server_port": data.get("server_port") or data.get("serverPort") or data.get("port", 0),
+        "method": data.get("method") or data.get("cipher") or "chacha20-ietf-poly1305",
+        "password": data.get("password") or data.get("secret") or "",
+        "prefix": data.get("prefix") or None,
+        "plugin": data.get("plugin") or None,
+        "plugin_opts": data.get("plugin_opts") or data.get("pluginOpts") or None,
+    }
 
 
-# ── shadowsocks config generation ────────────────────────────────────
-
-def _generate_sslocal_config(config: dict, local_port: int):
-    """Generate a sslocal-compatible JSON config from normalized Outline config.
-    
-    NOTE: The Outline server may return a "prefix" field (TLS ClientHello
-    obfuscation bytes), but including it in the sslocal config currently breaks
-    shadowsocks-rust 1.24.0 ("unexpected end of file").  We intentionally omit
-    prefix from the generated config.  Use `outline-ss debug-config` to inspect
-    the full fetched response including any prefix.
-    """
-    ss_config = {
+def _generate_backend_config(config: dict, local_port: int):
+    out = {
         "server": config["server"],
         "server_port": int(config["server_port"]),
         "method": config["method"],
         "password": config["password"],
         "local_address": "127.0.0.1",
-        "local_port": local_port,
+        "local_port": int(local_port),
         "mode": "tcp_only",
     }
-    # Future: if shadowsocks-rust fixes prefix handling, uncomment below:
-    # if config.get("prefix"):
-    #     ss_config["prefix"] = config["prefix"]
-    return json.dumps(ss_config, indent=2)
+    if config.get("prefix"):
+        # The Outline API returns prefix as a unicode string where each codepoint
+        # maps 1:1 to a raw byte (latin-1 encoding). sslocal expects base64.
+        # Direct unicode passthrough causes UTF-8 re-encoding and corrupts the bytes.
+        raw_bytes = bytes(ord(c) for c in config["prefix"])
+        out["prefix"] = base64.b64encode(raw_bytes).decode()
+    if config.get("plugin"):
+        out["plugin"] = config["plugin"]
+    if config.get("plugin_opts"):
+        out["plugin_opts"] = config["plugin_opts"]
+    return json.dumps(out, indent=2)
 
 
 def _write_config(profile: str, config: dict, local_port: int):
-    """Write Shadowsocks config file with 0600 permissions."""
     path = _conf_path(profile)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    content = _generate_sslocal_config(config, local_port)
-    # Write atomically
+    content = _generate_backend_config(config, local_port)
     tmp_path = path + ".tmp"
     with open(tmp_path, "w") as f:
         f.write(content)
@@ -196,19 +169,53 @@ def _write_config(profile: str, config: dict, local_port: int):
     return path
 
 
-# ── systemd lifecycle ────────────────────────────────────────────────
+def _backend_candidates():
+    env = os.environ.get(BACKEND_ENV, "").strip()
+    candidates = []
+    if env:
+        candidates.append(env)
+    candidates.extend([
+        os.path.expanduser("~/.local/lib/outline/outline-local"),
+        os.path.expanduser("~/.local/bin/outline-local"),
+        "/usr/local/libexec/outline-local",
+        "/usr/local/bin/outline-local",
+        "/usr/bin/outline-local",
+        "/opt/outline/resources/outline-local",
+        "/opt/Outline/outline-local",
+        "/usr/local/bin/sslocal",
+        shutil.which("sslocal") or "",
+    ])
+    seen = set()
+    for cand in candidates:
+        cand = cand.strip()
+        if not cand or cand in seen:
+            continue
+        seen.add(cand)
+        yield cand
+
+
+def _detect_backend():
+    for cand in _backend_candidates():
+        if os.path.isabs(cand):
+            if os.path.exists(cand) and os.access(cand, os.X_OK):
+                return cand
+        else:
+            resolved = shutil.which(cand)
+            if resolved:
+                return resolved
+    raise RuntimeError(
+        "No supported Outline backend found. Set OUTLINE_SS_BACKEND to the official Linux Outline local client binary."
+    )
+
 
 def _service_active(profile: str):
-    """Check if the systemd user unit is active."""
     try:
-        out = _run(SYSTEMCTL + ["is-active", _service_name(profile)])
-        return out == "active"
+        return _run(SYSTEMCTL + ["is-active", _service_name(profile)]) == "active"
     except Exception:
         return False
 
 
 def _service_substate(profile: str):
-    """Get systemd unit SubstState."""
     try:
         result = _run(SYSTEMCTL + ["show", _service_name(profile), "-p", "SubState"])
         return result.split("=", 1)[1] if "=" in result else "unknown"
@@ -217,25 +224,20 @@ def _service_substate(profile: str):
 
 
 def _start_service(profile: str):
-    """Start the systemd user unit."""
     try:
-        # Systemd v256+ on Fedora doesn't need --user enable --now for user units
         _run(SYSTEMCTL + ["start", _service_name(profile)], capture=False, check=True)
     except RuntimeError as e:
         raise RuntimeError(f"Failed to start service: {e}")
 
 
 def _stop_service(profile: str):
-    """Stop the systemd user unit."""
     try:
         _run(SYSTEMCTL + ["stop", _service_name(profile)], capture=False, check=True)
     except RuntimeError:
-        # Already stopped is not an error
         pass
 
 
 def _check_tcp(host="127.0.0.1", port=DEFAULT_LOCAL_PORT):
-    """Check if the SOCKS5 port is listening."""
     import socket
     try:
         s = socket.create_connection((host, port), timeout=2)
@@ -245,25 +247,13 @@ def _check_tcp(host="127.0.0.1", port=DEFAULT_LOCAL_PORT):
         return False
 
 
-# ── KDE system proxy management ──────────────────────────────────────
-
 def _set_kde_proxy(host="127.0.0.1", port=1080):
-    """Configure KDE to use SOCKS5 proxy via kioslaverc."""
     try:
-        # Set all proxy types to SOCKS5 (Firefox/KDE apps look at these)
-        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings",
-              "--key", "socksProxy", f"socks5://{host}:{port}"], check=True)
-        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings",
-              "--key", "httpProxy", f"socks5://{host}:{port}"], check=True)
-        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings",
-              "--key", "httpsProxy", f"socks5://{host}:{port}"], check=True)
-        # Set proxy type to manual (0=none, 1=manual, 2=env, 3=PAC)
-        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings",
-              "--key", "ProxyType", "--type", "int", "1"], check=True)
-        # Signal KDE to reload config
-        _run(["dbus-send", "--session", "--dest=org.kde.kded6",
-              "/kded", "org.kde.kded6.reconfigure"], check=False)
-        # Try kded6 reconfigure via qdbus (qdbus-qt6 on Fedora, qdbus elsewhere)
+        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "socksProxy", f"socks5://{host}:{port}"], check=True)
+        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "httpProxy", f"socks5://{host}:{port}"], check=True)
+        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "httpsProxy", f"socks5://{host}:{port}"], check=True)
+        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "ProxyType", "--type", "int", "1"], check=True)
+        _run(["dbus-send", "--session", "--dest=org.kde.kded6", "/kded", "org.kde.kded6.reconfigure"], check=False)
         qdbus_bin = shutil.which("qdbus-qt6") or "qdbus"
         _run([qdbus_bin, "org.kde.kded6", "/modules/proxyscout", "reload"], check=False)
         sys.stderr.write(f"✓ System proxy set to {host}:{port}\n")
@@ -272,93 +262,77 @@ def _set_kde_proxy(host="127.0.0.1", port=1080):
 
 
 def _clear_kde_proxy():
-    """Remove SOCKS5 proxy from KDE configuration."""
     try:
-        # Disable proxy (set to none)
-        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings",
-              "--key", "ProxyType", "--type", "int", "0"], check=False)
-        # Remove proxy entries
-        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings",
-              "--key", "socksProxy", "--delete"], check=False)
-        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings",
-              "--key", "httpProxy", "--delete"], check=False)
-        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings",
-              "--key", "httpsProxy", "--delete"], check=False)
-        # Signal KDE to reload
-        _run(["dbus-send", "--session", "--dest=org.kde.kded6",
-              "/kded", "org.kde.kded6.reconfigure"], check=False)
+        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "ProxyType", "--type", "int", "0"], check=False)
+        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "socksProxy", "--delete"], check=False)
+        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "httpProxy", "--delete"], check=False)
+        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "httpsProxy", "--delete"], check=False)
+        _run(["dbus-send", "--session", "--dest=org.kde.kded6", "/kded", "org.kde.kded6.reconfigure"], check=False)
         sys.stderr.write("✓ System proxy cleared\n")
     except Exception as e:
         sys.stderr.write(f"Warning: failed to clear KDE proxy: {e}\n")
 
 
-# ── commands ─────────────────────────────────────────────────────────
+def _cleanup_proxy():
+    _clear_kde_proxy()
+    ff_proxy = shutil.which("configure-firefox-proxy")
+    if ff_proxy:
+        subprocess.run([ff_proxy, "clear"], check=False)
+
+
+def _write_status(profile: str, config: dict, local_port: int, backend: str):
+    status = {
+        "server": config["server"],
+        "server_port": config["server_port"],
+        "method": config["method"],
+        "local_port": local_port,
+        "backend": backend,
+        "status": "connected",
+    }
+    spath = _status_path(profile)
+    with open(spath, "w") as f:
+        json.dump(status, f)
+    os.chmod(spath, 0o600)
+
 
 def cmd_connect(url: str, profile: str = DEFAULT_PROFILE, local_port: int = DEFAULT_LOCAL_PORT):
-    """Connect: resolve ssconf://, write config, start systemd service."""
     if not url.startswith("ssconf://"):
-        # Also support bare host:port/path (without ssconf:// prefix)
         if re.match(r'^[\w.-]+:\d+', url) or url.startswith("https://"):
             url = url.replace("https://", "ssconf://", 1) if url.startswith("https://") else f"ssconf://{url}"
         else:
             print("error: URL must start with ssconf:// or be a host:port/path", file=sys.stderr)
             sys.exit(1)
-
     try:
-        # Stop any existing service first
+        backend = _detect_backend()
         if _service_active(profile):
             _stop_service(profile)
-            # Wait for port to free
             for _ in range(10):
                 if not _check_tcp(port=local_port):
                     break
                 time.sleep(0.5)
-
-        # Resolve
         host, port, path = _parse_ssconf_url(url)
         sys.stderr.write(f"Fetching config from {host}:{port}{path}...\n")
         config = _fetch_config(host, port, path)
-
-        # Write config
         conf_path = _write_config(profile, config, local_port)
-        sys.stderr.write(f"Config written to {conf_path} (method={config['method']}, server={config['server']}:{config['server_port']})\n")
-
-        # Start service
+        sys.stderr.write(f"Config written to {conf_path} (backend={backend}, server={config['server']}:{config['server_port']})\n")
         _start_service(profile)
-
-        # Wait briefly and check
         time.sleep(0.5)
-
-        # Write status
-        _write_status(profile, config, local_port)
-        
-        # Set system proxy
+        _write_status(profile, config, local_port, backend)
         _set_kde_proxy("127.0.0.1", local_port)
-
-        # Configure Firefox proxy
         ff_proxy = shutil.which("configure-firefox-proxy")
         if ff_proxy:
             _run([ff_proxy], check=False)
-
-        if _check_tcp(port=local_port):
-            print("ok")
-        else:
-            print("ok (starting)")
+        print("ok" if _check_tcp(port=local_port) else "ok (starting)")
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
 
 def cmd_disconnect(profile: str = DEFAULT_PROFILE):
-    """Disconnect: stop systemd service, clean up."""
     try:
         _stop_service(profile)
-        # Wait for shutdown
         time.sleep(0.3)
-        
-        # Clean up ALL proxy residues (KDE + Firefox)
         _cleanup_proxy()
-        
         print("ok")
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
@@ -366,7 +340,6 @@ def cmd_disconnect(profile: str = DEFAULT_PROFILE):
 
 
 def cmd_cleanup(profile: str = DEFAULT_PROFILE):
-    """Clean up proxy settings (for ExecStopPost hook or manual recovery)."""
     try:
         _clear_kde_proxy()
         ff_proxy = shutil.which("configure-firefox-proxy")
@@ -379,7 +352,6 @@ def cmd_cleanup(profile: str = DEFAULT_PROFILE):
 
 
 def cmd_recover():
-    """Emergency: purge ALL proxy settings and Firefox user.js overrides."""
     print("Emergency recovery: purging ALL Outline proxy residues...", file=sys.stderr)
     _clear_kde_proxy()
     ff_proxy = shutil.which("configure-firefox-proxy")
@@ -388,43 +360,32 @@ def cmd_recover():
     print("ok", file=sys.stderr)
 
 
-def _cleanup_proxy():
-    """Full proxy cleanup: KDE + Firefox."""
-    _clear_kde_proxy()
-    ff_proxy = shutil.which("configure-firefox-proxy")
-    if ff_proxy:
-        subprocess.run([ff_proxy, "clear"], check=False)
-
-
 def cmd_debug_config(url: str):
-    """Debug: fetch, normalize, and print the generated sslocal config."""
     if not url.startswith("ssconf://"):
         if re.match(r'^[\w.-]+:\d+', url) or url.startswith("https://"):
             url = url.replace("https://", "ssconf://", 1) if url.startswith("https://") else f"ssconf://{url}"
     host, port, path = _parse_ssconf_url(url)
-    raw = _fetch_config(host, port, path)
+    raw = _fetch_raw_config(host, port, path)
     norm = _normalize_json_config(raw)
-    gen = _generate_sslocal_config(norm, DEFAULT_LOCAL_PORT)
+    gen = _generate_backend_config(norm, DEFAULT_LOCAL_PORT)
     print("=== Raw Outline response ===")
     print(json.dumps(raw, indent=2))
     print("\n=== Normalized ===")
     print(json.dumps({k: v for k, v in norm.items() if v is not None}, indent=2))
-    print("\n=== Generated sslocal config ===")
+    print("\n=== Generated backend config ===")
     print(gen)
+    try:
+        print("\n=== Detected backend ===")
+        print(_detect_backend())
+    except Exception as e:
+        print("\n=== Detected backend ===")
+        print(f"ERROR: {e}")
 
 
 def cmd_status(profile: str = DEFAULT_PROFILE):
-    """Get current status as JSON."""
     active = _service_active(profile)
     tcp_ok = _check_tcp()
-
-    # Read saved config if available
-    status = {
-        "status": "connected" if (active and tcp_ok) else ("connecting" if active else "disconnected"),
-        "local_port": DEFAULT_LOCAL_PORT,
-    }
-
-    # Try to read saved config from status file
+    status = {"status": "connected" if (active and tcp_ok) else ("connecting" if active else "disconnected"), "local_port": DEFAULT_LOCAL_PORT}
     spath = _status_path(profile)
     if os.path.isfile(spath):
         try:
@@ -433,57 +394,28 @@ def cmd_status(profile: str = DEFAULT_PROFILE):
             status.update({k: v for k, v in saved.items() if k != "status"})
         except Exception:
             pass
-
-    # Override with real-time state
     if active:
-        substate = _service_substate(profile)
-        status["systemd_substate"] = substate
-
+        status["systemd_substate"] = _service_substate(profile)
     print(json.dumps(status))
 
 
-def _write_status(profile: str, config: dict, local_port: int):
-    """Write status file for fast polling."""
-    status = {
-        "server": config["server"],
-        "server_port": config["server_port"],
-        "method": config["method"],
-        "local_port": local_port,
-        "status": "connected",
-    }
-    spath = _status_path(profile)
-    with open(spath, "w") as f:
-        json.dump(status, f)
-    os.chmod(spath, 0o600)
-
-
-# ── CLI entry ────────────────────────────────────────────────────────
-
 def main():
-    parser = argparse.ArgumentParser(prog="outline-ss", description="Outline Shadowsocks Client CLI")
+    parser = argparse.ArgumentParser(prog="outline-ss", description="Outline client CLI")
     sub = parser.add_subparsers(dest="command", required=True)
-
     p_connect = sub.add_parser("connect", help="Connect to Outline server")
     p_connect.add_argument("url", help="ssconf:// URL (or host:port/path)")
     p_connect.add_argument("--profile", "-p", default=DEFAULT_PROFILE, help="Profile name (default: default)")
     p_connect.add_argument("--local-port", "-l", type=int, default=DEFAULT_LOCAL_PORT, help="Local SOCKS5 port")
-
     p_disconnect = sub.add_parser("disconnect", help="Disconnect from Outline server")
     p_disconnect.add_argument("--profile", "-p", default=DEFAULT_PROFILE, help="Profile name")
-
     p_cleanup = sub.add_parser("cleanup", help="Clean up proxy settings (for systemd hooks)")
     p_cleanup.add_argument("--profile", "-p", default=DEFAULT_PROFILE, help="Profile name")
-
-    p_recover = sub.add_parser("recover", help="Emergency: purge ALL proxy residues")
-
-    p_debug = sub.add_parser("debug-config", help="Debug: fetch and print generated sslocal config")
+    sub.add_parser("recover", help="Emergency: purge ALL proxy residues")
+    p_debug = sub.add_parser("debug-config", help="Debug: fetch and print generated backend config")
     p_debug.add_argument("url", help="ssconf:// URL")
-
     p_status = sub.add_parser("status", help="Show connection status")
     p_status.add_argument("--profile", "-p", default=DEFAULT_PROFILE, help="Profile name")
-
     args = parser.parse_args()
-
     if args.command == "connect":
         cmd_connect(args.url, args.profile, args.local_port)
     elif args.command == "disconnect":

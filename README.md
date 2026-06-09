@@ -147,19 +147,30 @@ outline-plasmoid/
 | `$XDG_RUNTIME_DIR/outline-ss/status-profile.json` | Connection status cache |
 | `~/.config/outline-ss/ca-bundle.crt` | Optional custom CA cert for Outline server |
 
+## Backend
+
+`outline-ss` now supports a pluggable local backend.
+
+Backend detection order:
+1. `OUTLINE_SS_BACKEND` environment variable
+2. `~/.config/outline-ss/backend.env`
+3. autodetected `outline-local`
+4. fallback `sslocal`
+
+The intended long-term backend is the official Outline local client (`outline-local`),
+because the generic `sslocal` client does not reliably handle modern Outline
+transport details such as `prefix` on Linux.
+
 ## Known limitations
 
 ### Prefix obfuscation
 
 The Outline API returns a `prefix` field (TLS ClientHello header bytes) for DPI
-obfuscation. **This field is intentionally excluded from the generated sslocal
-config** because it causes shadowsocks-rust ≥1.24.0 to fail with
-"unexpected end of file".
+obfuscation. `outline-ss debug-config` preserves and shows this field.
 
-The proxy tunnels successfully without it, and `outline-ss debug-config` shows
-the full API response including the prefix for inspection. If shadowsocks-rust
-adds prefix support in a future release, the generator can be updated to
-include it.
+When using the official Outline backend, the generated config includes `prefix`.
+When falling back to generic `sslocal`, compatibility is backend-dependent and
+may still fail on Linux even with a valid key.
 
 ### UDP not enabled
 

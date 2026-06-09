@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
 SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 PLASMOID_DIR="$HOME/.local/share/plasma/plasmoids/org.kde.plasma.outline-ss"
+OUTLINE_CONF_DIR="$HOME/.config/outline-ss"
 
 echo "==> outline-plasmoid installer"
 echo "    Target: $PLASMOID_DIR"
@@ -29,10 +30,43 @@ export PATH="$BIN_DIR:$PATH"
 # ── 2. Install systemd user unit ────────────────────────────────────────
 echo ""
 echo "── Installing systemd user unit"
-mkdir -p "$SYSTEMD_USER_DIR"
+mkdir -p "$SYSTEMD_USER_DIR" "$OUTLINE_CONF_DIR"
 cp "$SCRIPT_DIR/systemd/outline-ss@.service" "$SYSTEMD_USER_DIR/outline-ss@.service"
 systemctl --user daemon-reload
 echo "   ✓ outline-ss@.service (daemon-reloaded)"
+
+echo "── Detecting backend"
+BACKEND="${OUTLINE_SS_BACKEND:-}"
+if [ -z "$BACKEND" ]; then
+    for cand in \
+        "$HOME/.local/lib/outline/outline-local" \
+        "$HOME/.local/bin/outline-local" \
+        /usr/local/libexec/outline-local \
+        /usr/local/bin/outline-local \
+        /usr/bin/outline-local \
+        /opt/outline/resources/outline-local \
+        /opt/Outline/outline-local \
+        /usr/local/bin/sslocal
+    do
+        if [ -x "$cand" ]; then
+            BACKEND="$cand"
+            break
+        fi
+    done
+fi
+if [ -z "$BACKEND" ] && command -v outline-local >/dev/null 2>&1; then
+    BACKEND="$(command -v outline-local)"
+fi
+if [ -z "$BACKEND" ] && command -v sslocal >/dev/null 2>&1; then
+    BACKEND="$(command -v sslocal)"
+fi
+if [ -n "$BACKEND" ]; then
+    printf 'OUTLINE_SS_BACKEND=%s\n' "$BACKEND" > "$OUTLINE_CONF_DIR/backend.env"
+    chmod 600 "$OUTLINE_CONF_DIR/backend.env"
+    echo "   ✓ backend: $BACKEND"
+else
+    echo "   ⚠ no backend detected; set OUTLINE_SS_BACKEND manually before first connect"
+fi
 
 # ── 2.5. Clean up stale proxy state from previous broken sessions ────────
 echo ""
@@ -92,4 +126,6 @@ echo "==> Done!"
 echo ""
 echo "    Add the widget: right-click panel → Add Widgets → search 'Outline'"
 echo "    Then right-click the widget → Configure → paste your ssconf:// URL"
+echo "    Backend override: export OUTLINE_SS_BACKEND=/path/to/outline-local"
+echo "                      or set it in ~/.config/outline-ss/backend.env"
 echo ""

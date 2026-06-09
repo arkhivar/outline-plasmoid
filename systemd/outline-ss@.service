@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/sslocal -c %h/.config/systemd/user/outline-ss@%i.conf
+ExecStart=%h/.local/bin/outline-ss-runner %i
 # Defense in depth: cleanup runs on ANY stop (manual, crash, or reboot)
 ExecStopPost=-%h/.local/bin/outline-ss cleanup --profile %i
 Restart=on-failure
