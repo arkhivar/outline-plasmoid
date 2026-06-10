@@ -9,7 +9,7 @@ This proxy serialises upstream connections to stay within the limit,
 queuing excess browser requests until a slot + cooldown is available.
 
 Usage:
-    outline-ss-pool [--listen 1081] [--upstream 1080] [--max-conn 2] [--cooldown 11]
+    outline-ss-pool [--listen 1081] [--upstream 1080] [--max-conn 2] [--cooldown 5]
 """
 
 import argparse
@@ -105,7 +105,7 @@ class ConnectionPool:
         self._host = upstream_host
         self._port = upstream_port
         # Token bucket: burst = max_conn (open connections immediately),
-        # then 1 per cooldown seconds (wait for FIN-WAIT-1 to expire).
+        # then 1 per cooldown seconds (server rate-limits new connections ~1/2-3s).
         self._bucket = TokenBucket(burst=max_conn, interval=cooldown)
         self._active = 0
         self._max = max_conn
@@ -222,8 +222,8 @@ async def main():
     parser.add_argument("--listen", default="127.0.0.1:1081")
     parser.add_argument("--upstream", default="127.0.0.1:1080")
     parser.add_argument("--max-conn", type=int, default=2)
-    parser.add_argument("--cooldown", type=float, default=11.0,
-                        help="Seconds between new upstream connections (default 11)")
+    parser.add_argument("--cooldown", type=float, default=5.0,
+                        help="Seconds between new upstream connections")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 

@@ -443,9 +443,8 @@ def cmd_debug_config(url: str):
 
 def cmd_status(profile: str = DEFAULT_PROFILE):
     running = _backend_running(profile)
-    tcp_ok = _check_tcp()
     status = {
-        "status": "connected" if (running and tcp_ok) else ("connecting" if running else "disconnected"),
+        "status": "connected" if running else "disconnected",
         "local_port": DEFAULT_LOCAL_PORT,
     }
     if running:
