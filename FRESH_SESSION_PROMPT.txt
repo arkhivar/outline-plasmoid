@@ -1,0 +1,60 @@
+You are helping with the outline-plasmoid project on Fedora Asahi Linux ARM64 (M2 MacBook Pro, KDE Plasma 6).
+
+Repo: https://github.com/arkhivar/outline-plasmoid — this is the source of truth.
+Clone it and read these files FIRST before doing anything else:
+
+  README.md       — architecture, requirements, known limitations
+  AGENTS.md       — rules and CLI architecture for agents
+  _PROBLEMS.md    — diagnostic log: EVERY hurdle, root cause, and fix from prior sessions. DO NOT re-solve anything documented here.
+
+## Current state
+
+WHAT WORKS:
+- `outline-ss connect` → starts sslocal + pool proxy, configures KDE + Firefox
+- `curl --proxy socks5h://127.0.0.1:1081 https://www.youtube.com` → HTTP 200
+- Russian sites (yandex.ru, vk.com) work in Firefox through the proxy
+- `outline-ss disconnect` → cleanly stops everything, clears proxy settings
+
+WHAT DOESN'T WORK:
+- Firefox browsing YouTube / Instagram / Google-heavy sites through the proxy
+  These sites time out because they load resources from 6+ hosts simultaneously,
+  and the pool proxy only has 2 concurrent upstream slots with an 11s token refill.
+  By the time the 3rd host gets a slot, browser-side timeouts have already fired.
+
+ROOT CAUSE:
+  The Outline server at 194.247.182.162:24631 allows only 2 concurrent TCP connections
+  per client IP. Browsers open 6-12 connections in parallel. The pool proxy serializes
+  them but the token bucket (burst=2, interval=11s) is too slow for real browsing.
+
+## Your task
+
+Investigate and implement the v2ray/Xray + mux.cool approach (see _PROBLEMS.md §10).
+Connection multiplexing over a single TCP connection is the only way to work within
+the 2-connection server limit for comfortable web browsing.
+
+Key design:
+  Firefox → outline-ss-pool (1081) → xray SOCKS5 inbound (1080) → mux.cool → Shadowsocks outbound → server
+
+Questions to answer:
+1. Is xray available for Fedora ARM64? (dnf, COPR, or GitHub binary)
+2. Can xray reproduce the Outline server's prefix obfuscation?
+3. Does mux.cool work with the Outline Shadowsocks server?
+4. Do we still need the pool proxy if xray handles multiplexing?
+
+## Critical gotchas (DO NOT REPEAT)
+
+- Prefix bytes: Outline API returns Unicode string; json.dumps corrupts multi-byte bytes via \u escapes. Use base64 encoding in the JSON config. See §3.
+- sslocal: NEVER pass --timeout, --tcp-keep-alive, --nofile flags with -c (config mode). Put "timeout": 60 in the JSON config instead. See §5.
+- Firefox TLS proxy: network.proxy.proxy_over_tls MUST be false (sslocal is plain SOCKS5, not TLS). See §4.
+- Firefox DNS: network.proxy.socks_remote_dns MUST be true (prevents DNS leaks). See §4.
+- qdbus on Fedora: binary is qdbus-qt6, not qdbus. Use shutil.which("qdbus-qt6") or "qdbus". See §2.
+- systemd: Do NOT use systemd ExecStart for the hot path. Use direct process management with PID files in XDG_RUNTIME_DIR. See §2.
+- Server rate-limiting: After many connection attempts, the server stops responding for ~120s. FIN-WAIT-1 orphans accumulate. Wait before retesting. See §8.
+
+## Rules
+
+- Work in ~/outline-plasmoid (clone if missing)
+- Read _PROBLEMS.md first — don't re-solve documented problems
+- Fedora ARM64 native packages only (dnf), no Docker/Snap/Flatpak
+- Commit working changes and push to GitHub frequently
+- Test with curl before testing with Firefox
