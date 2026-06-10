@@ -136,6 +136,26 @@ def _normalize_json_config(data: dict):
     }
 
 
+def _generate_go_config(config: dict, local_port: int):
+    """Generate config in the format outline-go-tun2socks expects.
+    
+    The Outline API returns prefix as a Unicode string where each codepoint
+    maps 1:1 to a raw byte. outline-go-tun2socks expects exactly this format.
+    Unlike sslocal (which needs base64), the Go client handles Unicode prefix natively.
+    """
+    out = {
+        "host": config["server"],
+        "port": int(config["server_port"]),
+        "method": config["method"],
+        "password": config["password"],
+    }
+    if config.get("prefix"):
+        # API returns prefix as unicode string with one codepoint per byte
+        # Pass it through directly - the Go library decodes with DecodeUTF8CodepointsToRawBytes
+        out["prefix"] = config["prefix"]
+    return json.dumps(out, ensure_ascii=False)
+
+
 def _generate_backend_config(config: dict, local_port: int):
     out = {
         "server": config["server"],
@@ -177,6 +197,9 @@ def _backend_candidates():
     if env:
         candidates.append(env)
     candidates.extend([
+        # Prefer the official Go Outline proxy (same library as Windows/Android)
+        os.path.expanduser("~/.local/bin/outline-go-proxy"),
+        shutil.which("outline-go-proxy") or "",
         os.path.expanduser("~/.local/lib/outline/outline-local"),
         os.path.expanduser("~/.local/bin/outline-local"),
         "/usr/local/libexec/outline-local",
@@ -240,8 +263,13 @@ def _proc_alive(pid: int):
 def _start_backend(profile: str, backend: str, conf_path: str):
     """Launch backend directly as a detached child (no systemd)."""
     log = open(_log_path(profile), "a")
+    # outline-go-proxy uses --config flag, sslocal uses -c flag
+    if "go-proxy" in backend:
+        cmd = [backend, "--config", conf_path]
+    else:
+        cmd = [backend, "-c", conf_path]
     proc = subprocess.Popen(
-        [backend, "-c", conf_path],
+        cmd,
         stdout=log,
         stderr=log,
         stdin=subprocess.DEVNULL,
@@ -439,8 +467,19 @@ def cmd_connect(url: str, profile: str = DEFAULT_PROFILE, local_port: int = DEFA
         host, port, path = _parse_ssconf_url(url)
         sys.stderr.write(f"Fetching config from {host}:{port}{path}...\n")
         config = _fetch_config(host, port, path)
-        conf_path = _write_config(profile, config, local_port)
-        sys.stderr.write(f"Config written to {conf_path} (backend={backend}, server={config['server']}:{config['server_port']})\n")
+        # Generate config in the format the backend expects
+        is_go = "go-proxy" in backend
+        if is_go:
+            # Go backend expects API-native JSON (host/port/prefix in unicode)
+            conf_path = _conf_path(profile).replace(".json", "-go.json")
+            os.makedirs(os.path.dirname(conf_path), exist_ok=True)
+            content = _generate_go_config(config, local_port)
+            with open(conf_path, "w") as f:
+                f.write(content)
+            os.chmod(conf_path, 0o600)
+        else:
+            conf_path = _write_config(profile, config, local_port)
+        sys.stderr.write(f"Config: {conf_path} (backend={backend}, server={config['server']}:{config['server_port']})\n")
         pid = _start_backend(profile, backend, conf_path)
         sys.stderr.write(f"Started backend pid={pid}, log={_log_path(profile)}\n")
         # Wait for port to open
