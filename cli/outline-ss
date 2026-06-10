@@ -26,6 +26,8 @@ SERVICE_TEMPLATE = "outline-ss@{profile}.service"
 CONF_TEMPLATE = "outline-ss@{profile}.json"
 DEFAULT_PROFILE = "default"
 DEFAULT_LOCAL_PORT = 1080
+POOL_PORT = 1081
+POOL_COOLDOWN = 5.0
 FETCH_TIMEOUT = 15
 CUSTOM_CA_BUNDLE = os.path.expanduser("~/.config/outline-ss/ca-bundle.crt")
 CONF_DIR = os.path.expanduser("~/.config/outline-ss")
@@ -296,6 +298,77 @@ def _check_tcp(host="127.0.0.1", port=DEFAULT_LOCAL_PORT):
         return False
 
 
+# ── Connection pool (sits between browsers and sslocal) ──────────────
+
+def _pool_script():
+    """Return path to the pool proxy script."""
+    return shutil.which("outline-ss-pool") or os.path.expanduser("~/.local/bin/outline-ss-pool")
+
+
+def _pool_pid_path(profile: str):
+    return os.path.join(PID_DIR, f"pool-pid-{profile}")
+
+
+def _pool_running(profile: str):
+    try:
+        pid = int(Path(_pool_pid_path(profile)).read_text().strip())
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def _start_pool(profile: str):
+    """Start the connection-pool proxy on POOL_PORT → 127.0.0.1:DEFAULT_LOCAL_PORT."""
+    script = _pool_script()
+    if not script:
+        sys.stderr.write("Warning: outline-ss-pool not found, skipping pool\n")
+        return None
+    log = open(_log_path(profile), "a")
+    proc = subprocess.Popen(
+        [sys.executable, script,
+         "--listen", f"127.0.0.1:{POOL_PORT}",
+         "--upstream", f"127.0.0.1:{DEFAULT_LOCAL_PORT}",
+         "--max-conn", "2",
+         "--cooldown", str(POOL_COOLDOWN),
+         "--log-level", "INFO"],
+        stdout=log,
+        stderr=log,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    Path(_pool_pid_path(profile)).write_text(str(proc.pid))
+    log.close()
+    return proc.pid
+
+
+def _stop_pool(profile: str):
+    """Stop the pool proxy process."""
+    import signal
+    try:
+        pid = int(Path(_pool_pid_path(profile)).read_text().strip())
+    except Exception:
+        return
+    if _proc_alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(20):
+                time.sleep(0.15)
+                if not _proc_alive(pid):
+                    break
+            if _proc_alive(pid):
+                os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+    try:
+        os.unlink(_pool_pid_path(profile))
+    except FileNotFoundError:
+        pass
+
+
+# ── KDE / Firefox proxy helpers ──────────────────────────────────────
+
+
 def _set_kde_proxy(host="127.0.0.1", port=1080):
     try:
         _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "socksProxy", f"socks5://{host}:{port}"], check=True)
@@ -356,6 +429,8 @@ def cmd_connect(url: str, profile: str = DEFAULT_PROFILE, local_port: int = DEFA
         # Stop any existing instance (direct or systemd)
         if _backend_running(profile):
             _stop_backend(profile)
+        if _pool_running(profile):
+            _stop_pool(profile)
         _run(SYSTEMCTL + ["stop", _service_name(profile)], check=False)
         for _ in range(10):
             if not _check_tcp(port=local_port):
@@ -377,7 +452,7 @@ def cmd_connect(url: str, profile: str = DEFAULT_PROFILE, local_port: int = DEFA
         _set_kde_proxy("127.0.0.1", local_port)
         ff_proxy = shutil.which("configure-firefox-proxy")
         if ff_proxy:
-            _run([ff_proxy], check=False)
+            _run([ff_proxy, "--port", str(local_port)], check=False)
         print("ok" if _check_tcp(port=local_port) else "ok (starting)")
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
@@ -386,6 +461,7 @@ def cmd_connect(url: str, profile: str = DEFAULT_PROFILE, local_port: int = DEFA
 
 def cmd_disconnect(profile: str = DEFAULT_PROFILE):
     try:
+        _stop_pool(profile)
         _stop_backend(profile)
         _run(SYSTEMCTL + ["stop", _service_name(profile)], check=False)
         time.sleep(0.3)
@@ -398,6 +474,7 @@ def cmd_disconnect(profile: str = DEFAULT_PROFILE):
 
 def cmd_cleanup(profile: str = DEFAULT_PROFILE):
     try:
+        _stop_pool(profile)
         _clear_kde_proxy()
         ff_proxy = shutil.which("configure-firefox-proxy")
         if ff_proxy:
@@ -410,6 +487,7 @@ def cmd_cleanup(profile: str = DEFAULT_PROFILE):
 
 def cmd_recover():
     print("Emergency recovery: purging ALL Outline proxy residues...", file=sys.stderr)
+    _stop_pool(DEFAULT_PROFILE)
     _stop_backend(DEFAULT_PROFILE)
     _run(SYSTEMCTL + ["stop", _service_name(DEFAULT_PROFILE)], check=False)
     _clear_kde_proxy()
