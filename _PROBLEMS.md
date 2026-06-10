@@ -203,7 +203,7 @@ pkill -9 sslocal outline-ss-pool
 
 ---
 
-## 10. Proposed long-term fix: v2ray/Xray with mux.cool
+## 10. v2ray/Xray with mux.cool — REJECTED
 
 **Why**: The 2-connection server limit is fundamental — no amount of client-side
 pool tuning can make modern web browsing comfortable when the browser needs to
@@ -214,70 +214,64 @@ traffic multiplexed over a single TCP connection to the server.
 inbound and `mux.cool` multiplexing.  Xray is preferred (active fork, better
 performance, actively maintained).
 
-```
-  Firefox / Vivaldi
-        │
-        ▼
-  outline-ss-pool  (127.0.0.1:1081)   ← token bucket (short cooldown)
-        │
-        ▼
-  xray             (127.0.0.1:1080)   ← inbound: SOCKS5 + mux.cool
-        │                                 outbound: Shadowsocks w/ prefix
-        ▼
-  Outline server   (194.247.182.162:24631)
-```
+**Investigation results (2026-06-10)**:
 
-**Key config (Xray)**:
-```json
-{
-  "inbounds": [{
-    "port": 1080,
-    "protocol": "socks",
-    "settings": { "auth": "noauth", "udp": false },
-    "streamSettings": { "sockopt": { "tcpMptcp": false } }
-  }],
-  "outbounds": [{
-    "protocol": "shadowsocks",
-    "settings": {
-      "servers": [{
-        "address": "194.247.182.162", "port": 24631,
-        "method": "2022-blake3-aes-128-gcm",
-        "password": "<password>"
-      }]
-    },
-    "streamSettings": {
-      "network": "tcp",
-      "tcpSettings": { "header": { "type": "none" } },
-      "sockopt": {
-        "tcpFastOpen": true,
-        "tcpKeepAliveInterval": 30
-      }
-    },
-    "mux": {
-      "enabled": true,
-      "concurrency": 8
-    }
-  }]
-}
-```
+### 10.1 Xray availability on Fedora ARM64
+- ✅ **Available**: GitHub releases provide `linux-arm64` binaries
+- ❌ **Not in Fedora repos**: No `dnf install xray` or COPR available
+- Binary works fine: `/tmp/xray-test/xray version` → Xray 26.3.27 (go1.26.1 linux/arm64)
 
-**Benefits**:
-- `mux.concurrency=8` → up to 8 browser connections multiplexed over 1 TCP
-  connection to the server → far under the 2-connection limit
-- Works with existing Outline server (Shadowsocks protocol is identical)
-- Handles prefix obfuscation via stream settings
-- Mature, well-tested, widely used in censorship-circumvention
+### 10.2 Xray prefix obfuscation support
+- ❌ **NOT supported**: Xray/v2ray's Shadowsocks outbound has **no mechanism**
+  for prepending raw prefix bytes to the initial TCP payload. The Outline server
+  requires a specific ClientHello prefix (`0x16030100c2a80101`) to bypass DPI.
+  - Xray supports "tcpSettings.header" with HTTP camouflage, but this changes
+    the protocol entirely — the server expects raw Shadowsocks, not HTTP.
+  - No equivalent to shadowsocks-rust's `prefix` field exists in Xray.
 
-**Challenges / unknowns**:
-- Xray needs to be installed (`dnf install xray` or binary from GitHub)
-- Outline server may enforce additional protocol-level constraints beyond
-  plain Shadowsocks — needs testing
-- Prefix bytes: verify Xray can reproduce the exact ClientHello prefix the
-  Outline server expects
-- Connection lifecycle: the pool proxy may become unnecessary if Xray handles
-  multiplexing, or it may still be useful as a rate-limiting safety net
-- Package availability: Xray is not in Fedora repos; binary distribution from
-  GitHub or a COPR must be set up
+### 10.3 mux.cool with Outline Shadowsocks server
+- ❌ **Does NOT work**: mux.cool requires **server-side support**.
+  - When xray is configured with `"mux": {"enabled": true}` and a Shadowsocks
+    outbound, it attempts to connect to `v1.mux.cool:9527` **through** the
+    Shadowsocks tunnel.
+  - The Outline server receives mux frames and tries to forward them to
+    `v1.mux.cool:9527`, which fails because the server is a standard
+    Shadowsocks relay, not a mux endpoint.
+  - Log evidence: `proxy/shadowsocks: tunneling request to tcp:v1.mux.cool:9527`
+  - **mux.cool is a client-server protocol** — both ends must speak it.
 
-**Priority**: High.  This is the next session's first task.  The pool proxy is
-a valiant stopgap but the 2-slot bottleneck makes real browsing impossible.
+### 10.4 Alternative tools tested
+| Tool | Multiplexing | Works with Outline? | Notes |
+|------|-------------|---------------------|-------|
+| **gost** | `mws` (multiplex WebSocket) | ❌ No | Adds WebSocket framing; server expects raw Shadowsocks |
+| **glider** | `smux` (yamux) | ❌ No | Transport-layer only; requires server-side smux listener |
+| **v2ray/xray** | `mux.cool` | ❌ No | Requires server-side mux endpoint |
+
+### 10.5 Key finding: the 2-connection limit may be overstated
+- Direct sslocal connections (no pool proxy) passed **10/10 parallel tests**
+  to different hosts, suggesting the server's connection limit may be more
+  lenient than initially observed, or the limit applies only under sustained
+  load (not burst).
+- The pool proxy's 11-second cooldown may be overly conservative.
+- **Further investigation needed**: test direct sslocal with sustained load
+  (10+ connections per second for 10+ seconds) to determine actual limits.
+
+### 10.6 Conclusion
+**The v2ray/Xray + mux.cool approach is fundamentally incompatible with
+standard Outline Shadowsocks servers.** Connection multiplexing over a single
+TCP connection requires **both client and server to support the multiplexing
+protocol**. Since Outline servers only speak plain Shadowsocks, no client-side
+mux solution can work.
+
+**Next directions to explore**:
+1. **Optimize the pool proxy**: Test if the 2-connection limit is real under
+   sustained load; if not, reduce/remove the cooldown.
+2. **HTTP/2 browser optimization**: Configure Firefox to aggressively reuse
+   connections via HTTP/2, reducing the number of simultaneous TCP connections.
+3. **Local caching proxy**: Add a caching layer (e.g., squid, privoxy) to
+   reduce redundant connections to static resources.
+4. **Connection coalescing**: Run a local HTTP proxy that coalesces multiple
+   browser requests into fewer upstream connections.
+
+**Priority**: Medium. The pool proxy remains the best available solution;
+optimization and testing are the next steps.
