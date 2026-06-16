@@ -38,7 +38,12 @@ outline-plasmoid/
 │   └── outline-ss@.service     # systemd user unit (ExecStopPost → outline-ss cleanup)
 ```
 
-## Key rules
+## Key rules (before touching the system)
+
+**⚠️ Read `_SAFETY.md` first.**  On Ubuntu/KDE Neon, stale Outline artifacts
+(nftables rules, old systemd services, `shadowsocks-libev`) can trigger
+massive uncontrolled system upgrades that break KDE.  Always check for
+and remove those BEFORE running `install.sh`.
 
 1. **No secrets in the repo.** The Shadowsocks config files (`*.conf`) contain
    passwords and are `.gitignore`'d. Never commit or hardcode credentials.

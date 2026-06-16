@@ -172,9 +172,8 @@ PlasmoidItem {
 
     function doDisconnect() {
         var profile = plasmoid.configuration.profile || "default"
-        // Defense in depth: clear proxy FIRST in case service is already dead/crashed
-        actionSource.connectSource("outline-ss cleanup --profile " + profile)
-        // Then stop the service (will also trigger ExecStopPost, which is idempotent)
+        // disconnect handles both process stop AND proxy cleanup
+        // (calling connectSource twice cancels the first — only run one)
         actionSource.connectSource("outline-ss disconnect --profile " + profile)
     }
 }

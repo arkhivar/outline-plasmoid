@@ -14,6 +14,35 @@ echo "==> outline-plasmoid installer"
 echo "    Target: $PLASMOID_DIR"
 echo ""
 
+# ── 0. Safety pre-flight ───────────────────────────────────────────────
+# Check for stale Outline/Shadowsocks artifacts that can break the system.
+# See _SAFETY.md for details.
+WARNINGS=0
+
+if sudo -n nft list tables 2>/dev/null | grep -qi outline; then
+    echo "⚠ WARNING: Stale nftables 'outline' table — can redirect ALL TCP"
+    echo "  Fix: sudo nft delete table inet outline"
+    WARNINGS=$((WARNINGS + 1))
+fi
+
+for svc in outline-nftables outline-ss shadowsocks-libev; do
+    if systemctl list-units --all 2>/dev/null | grep -qi "$svc"; then
+        echo "⚠ WARNING: Stale service '$svc' found"
+        echo "  Fix: systemctl --user disable --now $svc"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+done
+
+for f in /etc/systemd/system/outline-nftables.service /etc/systemd/system/outline-ss.service /etc/nftables-outline.conf; do
+    if [ -f "$f" ]; then
+        echo "⚠ WARNING: Stale file: $f"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+done
+
+[ "$WARNINGS" -gt 0 ] && echo "(Read _SAFETY.md — continuing anyway)"
+echo ""
+
 # ── 1. Install CLI scripts ──────────────────────────────────────────────
 echo "── Installing CLI scripts to $BIN_DIR"
 mkdir -p "$BIN_DIR"

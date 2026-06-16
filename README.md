@@ -51,6 +51,13 @@ ClientHello prefix obfuscation (no base64 conversion needed).
 | kwriteconfig6 / kded6  | `kf6-kded`              | KDE proxy configuration          |
 | Firefox or Vivaldi     | `firefox` / `vivaldi`   | Browser (prefs auto-configured)  |
 
+## ⚠️ Read `_SAFETY.md` before installing on Ubuntu/KDE Neon
+
+The widget is safe, but stale Outline/Shadowsocks artifacts from previous
+tools can break your desktop. Check `_SAFETY.md` first — it covers nftables
+rules, old systemd services, and `apt-get` gotchas that can trigger 900+
+package upgrades.
+
 ## Install
 
 ```bash
