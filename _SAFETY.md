@@ -84,17 +84,7 @@ sudo rm -f /etc/nftables-outline.conf
 
 ---
 
-## 4. 🪦 Kill stale `ss-local` processes
-
-```bash
-pgrep -a ss-local
-# If anything shows up:
-sudo killall ss-local
-```
-
----
-
-## 5. ✅ The recommended install workflow
+## 4. ✅ The recommended install workflow
 
 ```bash
 # 1. Make sure the system is fully updated and consistent
@@ -113,7 +103,7 @@ chmod +x install.sh
 
 ---
 
-## 6. 🆘 Emergency recovery
+## 5. 🆘 Emergency recovery
 
 If you lose KDE Plasma (login loop / black screen / broken SDDM), the
 quickest recovery is:
@@ -129,12 +119,11 @@ sudo systemctl restart sddm
 
 ---
 
-## 7. 🔧 This widget uses `outline-go-proxy`, not `ss-local`
+## 6. 🔧 This widget uses `outline-go-proxy`
 
-The installed backend is **`outline-go-proxy`** (a Go-based SOCKS5 proxy
-that handles Outline's TLS ClientHello prefix obfuscation natively).
-`ss-local` is listed only as an **absolute last-resort fallback** —
-you should never need it.
+The installed backend is **`outline-go-proxy`** — a Go-based SOCKS5 proxy
+that handles Outline's TLS ClientHello prefix obfuscation natively.
+No other backend is needed or recommended.
 
 ---
 
