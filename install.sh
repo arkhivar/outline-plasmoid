@@ -47,7 +47,7 @@ echo ""
 echo "── Installing CLI scripts to $BIN_DIR"
 mkdir -p "$BIN_DIR"
 
-for script in outline-ss configure-firefox-proxy outline-ss-pool; do
+for script in outline-ss configure-firefox-proxy; do
     cp "$SCRIPT_DIR/cli/$script" "$BIN_DIR/$script"
     chmod +x "$BIN_DIR/$script"
     echo "   ✓ $script"
@@ -64,37 +64,15 @@ cp "$SCRIPT_DIR/systemd/outline-ss@.service" "$SYSTEMD_USER_DIR/outline-ss@.serv
 systemctl --user daemon-reload
 echo "   ✓ outline-ss@.service (daemon-reloaded)"
 
-echo "── Detecting backend"
-BACKEND="${OUTLINE_SS_BACKEND:-}"
-if [ -z "$BACKEND" ]; then
-    for cand in \
-        "$HOME/.local/lib/outline/outline-local" \
-        "$HOME/.local/bin/outline-local" \
-        /usr/local/libexec/outline-local \
-        /usr/local/bin/outline-local \
-        /usr/bin/outline-local \
-        /opt/outline/resources/outline-local \
-        /opt/Outline/outline-local \
-        /usr/local/bin/sslocal
-    do
-        if [ -x "$cand" ]; then
-            BACKEND="$cand"
-            break
-        fi
-    done
-fi
-if [ -z "$BACKEND" ] && command -v outline-local >/dev/null 2>&1; then
-    BACKEND="$(command -v outline-local)"
-fi
-if [ -z "$BACKEND" ] && command -v sslocal >/dev/null 2>&1; then
-    BACKEND="$(command -v sslocal)"
-fi
-if [ -n "$BACKEND" ]; then
-    printf 'OUTLINE_SS_BACKEND=%s\n' "$BACKEND" > "$OUTLINE_CONF_DIR/backend.env"
-    chmod 600 "$OUTLINE_CONF_DIR/backend.env"
-    echo "   ✓ backend: $BACKEND"
+echo "── Checking outline-go-proxy"
+BACKEND="${OUTLINE_SS_BACKEND:-$HOME/.local/bin/outline-go-proxy}"
+if [ -x "$BACKEND" ]; then
+    echo "   ✓ $BACKEND"
+elif command -v outline-go-proxy >/dev/null 2>&1; then
+    BACKEND="$(command -v outline-go-proxy)"
+    echo "   ✓ $BACKEND"
 else
-    echo "   ⚠ no backend detected; set OUTLINE_SS_BACKEND manually before first connect"
+    echo "   ⚠ outline-go-proxy not found — run: cd go-proxy && go build -o outline-go-proxy . && cp outline-go-proxy ~/.local/bin/"
 fi
 
 # ── 2.5. Clean up stale proxy state from previous broken sessions ────────
@@ -155,6 +133,6 @@ echo "==> Done!"
 echo ""
 echo "    Add the widget: right-click panel → Add Widgets → search 'Outline'"
 echo "    Then right-click the widget → Configure → paste your ssconf:// URL"
-echo "    Backend override: export OUTLINE_SS_BACKEND=/path/to/outline-local"
+echo "    Backend override: export OUTLINE_SS_BACKEND=~/.local/bin/outline-go-proxy"
 echo "                      or set it in ~/.config/outline-ss/backend.env"
 echo ""

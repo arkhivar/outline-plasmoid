@@ -28,7 +28,7 @@ ClientHello prefix obfuscation (no base64 conversion needed).
 ┌──────────────────────┐
 │  outline-ss (CLI)    │  ← Python, resolves ssconf:// URLs
 └─────────┬────────────┘
-          │ starts outline-go-proxy (or sslocal fallback)
+          │ starts outline-go-proxy
           ▼
 ┌──────────────────────┐
 │  outline-go-proxy    │  ← Go SOCKS5 on 127.0.0.1:1080
@@ -125,14 +125,17 @@ outline-ss recover
 outline-ss recover
 ```
 
-## Backend preference
+## Backend
 
-`outline-ss` auto-detects the backend in this order:
-1. `~/.local/bin/outline-go-proxy` — Go Outline SDK (preferred)
-2. `~/.local/bin/outline-local` — Official Outline local client
-3. `~/.local/bin/sslocal` — shadowsocks-rust (fallback)
+Only one backend is supported: **outline-go-proxy**, built from the official
+[outline-go-tun2socks](https://github.com/Jigsaw-Code/outline-go-tun2socks) Go SDK
+(same library as Outline Windows/Android clients).
 
-Set `OUTLINE_SS_BACKEND` env var to override.
+No fallbacks — sslocal, outline-local, and shadowsocks-libev are not supported
+and installing them can trigger dangerous system upgrades on Ubuntu/KDE Neon.
+See `_SAFETY.md`.
+
+Set `OUTLINE_SS_BACKEND` env var to override the binary path.
 
 ## Platform
 

@@ -32,8 +32,11 @@ outline-plasmoid/
 │           └── main.xml        # Persistent config schema (ssconf_url, local_port)
 ├── cli/
 │   ├── outline-ss              # Python CLI: connect/disconnect/status/cleanup/recover
-│   ├── outline-ss-pool         # Connection-pooling SOCKS5 proxy (token-bucket rate limiter)
 │   └── configure-firefox-proxy # Python: sets/clears Firefox SOCKS5 on ALL profiles
+├── go-proxy/
+│   ├── main.go                 # Go SOCKS5 proxy (official outline-go-tun2socks SDK)
+│   ├── go.mod / go.sum
+│   └── .gitignore
 └── systemd/
 │   └── outline-ss@.service     # systemd user unit (ExecStopPost → outline-ss cleanup)
 ```
@@ -76,21 +79,12 @@ and remove those BEFORE running `install.sh`.
 `outline-ss` is a single-file Python 3 script (zero dependencies beyond stdlib):
 
 - `connect` → resolve `ssconf://` URL over HTTPS, parse JSON config,
-  write config to `~/.config/outline-ss/outline-ss@<profile>.conf` with `0600`,
-  start `sslocal` directly (PID-file managed, no systemd),
-  start `outline-ss-pool` on port 1081 (token-bucket rate limiter),
-  configure KDE + Firefox to use 127.0.0.1:1081
-- `disconnect` → stop pool, stop sslocal, clear KDE + Firefox proxy via `configure-firefox-proxy`
-- `recover` → emergency: stop pool+sslocal, purge ALL proxy residues (KDE, Firefox)
-- `status` → JSON output: `{"status": "connected", "server": "...", "pool_running": true, ...}`
-
-`outline-ss-pool` is a separate Python 3 script (also zero deps beyond stdlib):
-
-- SOCKS5 proxy listening on 127.0.0.1:1081, forwarding to sslocal on 127.0.0.1:1080
-- Token-bucket rate limiting (burst=2, refill=1/11s) + semaphore (max 2 concurrent upstream connections)
-- Prevents the browser from overwhelming the Outline server's 2-connection TCP limit
-- See `_PROBLEMS.md` §6–7 for rationale and limitations
-
+  write config to `~/.config/outline-ss/outline-ss@<profile>-go.json`,
+  start `outline-go-proxy` directly (PID-file managed, no systemd),
+  configure KDE + Firefox to use 127.0.0.1:1080
+- `disconnect` → stop outline-go-proxy, clear KDE + Firefox proxy
+- `recover` → emergency: stop proxy, purge ALL proxy residues (KDE, Firefox)
+- `status` → JSON output: `{"status": "connected", "server": "...", "backend": "outline-go-proxy", ...}`
 
 ## Build / deploy
 
@@ -117,7 +111,7 @@ Manual testing workflow:
 6. Test `outline-ss status` from terminal
 
 **Recovery / safety flow:**
-7. Connect, then `pkill -9 sslocal` (simulate crash)
+7. Connect, then `pkill -9 outline-go-proxy` (simulate crash)
 8. Verify browsers break (they will — proxy settings point to dead port)
 9. Run `outline-ss recover`
 10. If still broken: `systemctl --user restart xdg-desktop-portal.service`
@@ -130,7 +124,7 @@ Manual testing workflow:
 
 ## Common issues
 
-- **sslocal not found**: install shadowsocks-rust (`cargo install shadowsocks-rust` or COPR)
+- **outline-go-proxy not found**: `cd go-proxy && go build -o outline-go-proxy . && cp outline-go-proxy ~/.local/bin/`
 - **Plasmoid doesn't load**: check `journalctl --user -f -u plasma-plasmashell` for QML errors
 - **systemd unit fails**: `systemctl --user status outline-ss@default.service`
 - **Firefox proxy not applying**: Firefox must be restarted if it was running

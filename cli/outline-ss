@@ -193,29 +193,16 @@ def _write_config(profile: str, config: dict, local_port: int):
 
 def _backend_candidates():
     env = os.environ.get(BACKEND_ENV, "").strip()
-    candidates = []
     if env:
-        candidates.append(env)
-    candidates.extend([
-        # Prefer the official Go Outline proxy (same library as Windows/Android)
+        yield env
+    # Only outline-go-proxy — the official Outline SDK (same as Windows/Android).
+    # No fallbacks.  sslocal / outline-local / shadowsocks-libev are not supported
+    # and installing them can trigger dangerous system upgrades on Ubuntu/KDE Neon.
+    # See _SAFETY.md.
+    for cand in [
         os.path.expanduser("~/.local/bin/outline-go-proxy"),
-        shutil.which("outline-go-proxy") or "",
-        os.path.expanduser("~/.local/lib/outline/outline-local"),
-        os.path.expanduser("~/.local/bin/outline-local"),
-        "/usr/local/libexec/outline-local",
-        "/usr/local/bin/outline-local",
-        "/usr/bin/outline-local",
-        "/opt/outline/resources/outline-local",
-        "/opt/Outline/outline-local",
-        "/usr/local/bin/sslocal",
-        shutil.which("sslocal") or "",
-    ])
-    seen = set()
-    for cand in candidates:
-        cand = cand.strip()
-        if not cand or cand in seen:
-            continue
-        seen.add(cand)
+        "outline-go-proxy",
+    ]:
         yield cand
 
 
@@ -229,7 +216,9 @@ def _detect_backend():
             if resolved:
                 return resolved
     raise RuntimeError(
-        "No supported Outline backend found. Set OUTLINE_SS_BACKEND to the official Linux Outline local client binary."
+        "outline-go-proxy not found.  Build it:\n"
+        "  cd <repo>/go-proxy && go build -o outline-go-proxy . && cp outline-go-proxy ~/.local/bin/\n"
+        "Or set OUTLINE_SS_BACKEND to the binary path."
     )
 
 
@@ -263,11 +252,7 @@ def _proc_alive(pid: int):
 def _start_backend(profile: str, backend: str, conf_path: str):
     """Launch backend directly as a detached child (no systemd)."""
     log = open(_log_path(profile), "a")
-    # outline-go-proxy uses --config flag, sslocal uses -c flag
-    if "go-proxy" in backend:
-        cmd = [backend, "--config", conf_path]
-    else:
-        cmd = [backend, "-c", conf_path]
+    cmd = [backend, "--config", conf_path]
     proc = subprocess.Popen(
         cmd,
         stdout=log,
