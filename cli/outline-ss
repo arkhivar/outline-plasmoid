@@ -396,7 +396,49 @@ def _set_kde_proxy(host="127.0.0.1", port=1080):
         sys.stderr.write(f"Warning: failed to set KDE proxy: {e}\n")
 
 
-def _clear_kde_proxy():
+def _set_vivaldi_proxy(host="127.0.0.1", port=1080):
+    """Configure Vivaldi (Chromium) to use SOCKS5 proxy.
+    
+    Chromium browsers don't read KDE system proxy reliably — they need
+    explicit proxy settings in their Preferences JSON file.
+    """
+    vivaldi_prefs = Path.home() / ".config" / "vivaldi" / "Default" / "Preferences"
+    if not vivaldi_prefs.exists():
+        return
+    try:
+        import json
+        raw = vivaldi_prefs.read_text(encoding="utf-8")
+        prefs = json.loads(raw)
+        prefs["proxy"] = {
+            "mode": "fixed_servers",
+            "server": f"socks5://{host}:{port}",
+            "bypass_list": "<local>",
+        }
+        tmp = vivaldi_prefs.with_suffix(".tmp")
+        tmp.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
+        tmp.replace(vivaldi_prefs)
+        sys.stderr.write(f"✓ Vivaldi proxy set to {host}:{port}\n")
+    except Exception as e:
+        sys.stderr.write(f"Warning: failed to set Vivaldi proxy: {e}\n")
+
+
+def _clear_vivaldi_proxy():
+    """Clear Vivaldi proxy settings, restore to system default."""
+    vivaldi_prefs = Path.home() / ".config" / "vivaldi" / "Default" / "Preferences"
+    if not vivaldi_prefs.exists():
+        return
+    try:
+        import json
+        raw = vivaldi_prefs.read_text(encoding="utf-8")
+        prefs = json.loads(raw)
+        if "proxy" in prefs:
+            prefs["proxy"] = {"mode": "system"}
+            tmp = vivaldi_prefs.with_suffix(".tmp")
+            tmp.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
+            tmp.replace(vivaldi_prefs)
+            sys.stderr.write("✓ Vivaldi proxy cleared\n")
+    except Exception as e:
+        sys.stderr.write(f"Warning: failed to clear Vivaldi proxy: {e}\n")
     try:
         _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "ProxyType", "--type", "int", "0"], check=False)
         _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "socksProxy", "--delete"], check=False)
@@ -410,6 +452,7 @@ def _clear_kde_proxy():
 
 def _cleanup_proxy():
     _clear_kde_proxy()
+    _clear_vivaldi_proxy()
     ff_proxy = shutil.which("configure-firefox-proxy")
     if ff_proxy:
         subprocess.run([ff_proxy, "clear"], check=False)
@@ -474,6 +517,7 @@ def cmd_connect(url: str, profile: str = DEFAULT_PROFILE, local_port: int = DEFA
             time.sleep(0.2)
         _write_status(profile, config, local_port, backend)
         _set_kde_proxy("127.0.0.1", local_port)
+        _set_vivaldi_proxy("127.0.0.1", local_port)
         ff_proxy = shutil.which("configure-firefox-proxy")
         if ff_proxy:
             _run([ff_proxy, "--port", str(local_port)], check=False)
@@ -500,6 +544,7 @@ def cmd_cleanup(profile: str = DEFAULT_PROFILE):
     try:
         _stop_pool(profile)
         _clear_kde_proxy()
+        _clear_vivaldi_proxy()
         ff_proxy = shutil.which("configure-firefox-proxy")
         if ff_proxy:
             subprocess.run([ff_proxy, "clear"], check=False)
@@ -515,6 +560,7 @@ def cmd_recover():
     _stop_backend(DEFAULT_PROFILE)
     _run(SYSTEMCTL + ["stop", _service_name(DEFAULT_PROFILE)], check=False)
     _clear_kde_proxy()
+    _clear_vivaldi_proxy()
     ff_proxy = shutil.which("configure-firefox-proxy")
     if ff_proxy:
         subprocess.run([ff_proxy, "clear"], check=False)
