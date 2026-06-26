@@ -149,12 +149,18 @@ def _clear_prefs_js_proxy(profile):
 
 
 def set_firefox_proxy(socks_host="127.0.0.1", socks_port=1080):
-    """Configure all Firefox profiles to use the SOCKS5 proxy."""
+    """Configure all Firefox profiles to use the SOCKS5 proxy.
+
+    Uses BOTH prefs.js AND user.js. user.js wins at Firefox startup and
+    cannot be overridden by Firefox re-writing prefs.js on shutdown.
+    This is the bulletproof mechanism that survives Firefox running during
+    a disconnect.
+    """
     firefox_dir = Path.home() / ".config" / "mozilla" / "firefox"
     if not firefox_dir.exists():
         firefox_dir = Path.home() / ".mozilla" / "firefox"
     if not firefox_dir.exists():
-        print(f"\u26a0 Firefox directory not found")
+        print("\u26a0 Firefox directory not found")
         return
 
     profiles = _find_firefox_profiles()
@@ -164,20 +170,24 @@ def set_firefox_proxy(socks_host="127.0.0.1", socks_port=1080):
 
     print(f"\U0001f980 Configuring Firefox proxy for {len(profiles)} profiles...")
 
+    proxy_user_js = (
+        "// Auto-configured by Outline SS widget\n"
+        f'user_pref("network.proxy.type", 1);\n'
+        f'user_pref("network.proxy.socks", "{socks_host}");\n'
+        f'user_pref("network.proxy.socks_port", {socks_port});\n'
+        f'user_pref("network.proxy.socks_remote_dns", true);\n'
+        f'user_pref("network.proxy.proxy_over_tls", false);\n'
+        f'user_pref("network.proxy.no_proxies_on", "localhost, 127.0.0.1");\n'
+    )
+
     for profile in profiles:
+        # user.js is the AUTHORITATIVE source -- Firefox cannot override it
         user_js = profile / "user.js"
-        # Remove any existing user.js (which would override prefs.js on every launch)
-        if user_js.exists():
-            user_js.unlink()
-        # Also remove stale backups
-        bak = profile / "user.js.outline-bak"
-        if bak.exists():
-            bak.unlink()
-
-        # Write prefs.js entries directly
+        user_js.write_text(proxy_user_js, encoding="utf-8")
+        # Also write prefs.js (in case Firefox syncs from it)
         _set_prefs_js_proxy(profile, socks_host, socks_port)
-
         print(f"  \u2713 {profile.name}  \u2192 socks5://{socks_host}:{socks_port}")
+
 
 
 def clear_firefox_proxy():
