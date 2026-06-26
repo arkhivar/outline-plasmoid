@@ -440,11 +440,20 @@ def _clear_vivaldi_proxy():
     except Exception as e:
         sys.stderr.write(f"Warning: failed to clear Vivaldi proxy: {e}\n")
     try:
+        # Reset proxy type first (required before deleting key-value pairs)
         _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "ProxyType", "--type", "int", "0"], check=False)
-        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "socksProxy", "--delete"], check=False)
-        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "httpProxy", "--delete"], check=False)
-        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "httpsProxy", "--delete"], check=False)
+        # Delete all proxy entries
+        for key in ("socksProxy", "httpProxy", "httpsProxy", "ftpProxy",
+                    "NoProxyFor", "ReversedException", "Proxy Config Script"):
+            _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", key, "--delete"], check=False)
+        # Force KDE to re-read: kded6 reconfig + KIO scheduler signal (belt and suspenders)
         _run(["dbus-send", "--session", "--dest=org.kde.kded6", "/kded", "org.kde.kded6.reconfigure"], check=False)
+        _run(["dbus-send", "--session", "--type=signal", "/KIO/Scheduler", "org.kde.KIO.Scheduler.proxyChanged"], check=False)
+        # Verify
+        result = _run(["kreadconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "ProxyType"], check=False)
+        if result != "0":
+            sys.stderr.write(f"⚠ KDE proxy clear may have failed (ProxyType={result}); running kwriteconfig6 again\n")
+            _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "ProxyType", "--type", "int", "0"], check=False)
         sys.stderr.write("✓ System proxy cleared\n")
     except Exception as e:
         sys.stderr.write(f"Warning: failed to clear KDE proxy: {e}\n")

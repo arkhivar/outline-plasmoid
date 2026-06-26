@@ -181,7 +181,11 @@ def set_firefox_proxy(socks_host="127.0.0.1", socks_port=1080):
 
 
 def clear_firefox_proxy():
-    """Clear proxy settings from ALL Firefox profiles."""
+    """Clear proxy settings from ALL Firefox profiles.
+    
+    Writes a disabling user.js (which overrides prefs.js) — this survives
+    Firefox re-writing prefs.js on shutdown with cached proxy settings.
+    """
     firefox_dir = Path.home() / ".config" / "mozilla" / "firefox"
     if not firefox_dir.exists():
         firefox_dir = Path.home() / ".mozilla" / "firefox"
@@ -195,15 +199,22 @@ def clear_firefox_proxy():
     print(f"\U0001f980 Clearing Firefox proxy for {len(profiles)} profiles...")
 
     for profile in profiles:
-        # Nuke user.js (Outline-created override file)
+        # Write a disabling user.js that FORCES no proxy.
+        # This survives Firefox overwriting prefs.js on shutdown.
         user_js = profile / "user.js"
-        if user_js.exists():
-            user_js.unlink()
+        user_js.write_text(
+            'user_pref("network.proxy.type", 0);\n'
+            'user_pref("network.proxy.socks", "");\n'
+            'user_pref("network.proxy.socks_port", 0);\n'
+            'user_pref("network.proxy.socks_remote_dns", false);\n',
+            encoding="utf-8"
+        )
+        # Also clean up any stale backup
         bak = profile / "user.js.outline-bak"
         if bak.exists():
             bak.unlink()
 
-        # Reset prefs.js proxy entries
+        # Reset prefs.js proxy entries too (belt-and-suspenders)
         _clear_prefs_js_proxy(profile)
 
         print(f"  \u2713 {profile.name}")
