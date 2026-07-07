@@ -1,17 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# outline-plasmoid installer
-# Run from the repo root: ./install.sh
+# outline-plasmoid installer (system-wide)
+# Run from the repo root: sudo ./install.sh
+# Installs to /usr/local/bin, /usr/share/plasma, /usr/lib/systemd/user, /etc/outline-ss
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_DIR="$HOME/.local/bin"
-SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
-PLASMOID_DIR="$HOME/.local/share/plasma/plasmoids/org.kde.plasma.outline-ss"
-OUTLINE_CONF_DIR="$HOME/.config/outline-ss"
+BIN_DIR="/usr/local/bin"
+SYSTEMD_USER_DIR="/usr/lib/systemd/user"
+PLASMOID_DIR="/usr/share/plasma/plasmoids/org.kde.plasma.outline-ss"
+OUTLINE_CONF_DIR="/etc/outline-ss"
 
-echo "==> outline-plasmoid installer"
-echo "    Target: $PLASMOID_DIR"
+# ── Root check ───────────────────────────────────────────────────────────
+if [ "$(id -u)" -ne 0 ]; then
+    echo "==> This installer installs system-wide and needs root."
+    echo "    Re-run as: sudo $0"
+    exit 1
+fi
+
+# Detect the real user (for plasma restart, KDE config, etc.)
+REAL_USER="${SUDO_USER:-$USER}"
+REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+REAL_UID=$(id -u "$REAL_USER")
+
+echo "==> outline-plasmoid installer (system-wide)"
+echo "    Target:  $PLASMOID_DIR"
+echo "    User:    $REAL_USER ($REAL_HOME)"
 echo ""
 
 # ── 0. Safety pre-flight ───────────────────────────────────────────────
@@ -19,16 +33,16 @@ echo ""
 # See _SAFETY.md for details.
 WARNINGS=0
 
-if sudo -n nft list tables 2>/dev/null | grep -qi outline; then
+if nft list tables 2>/dev/null | grep -qi outline; then
     echo "⚠ WARNING: Stale nftables 'outline' table — can redirect ALL TCP"
-    echo "  Fix: sudo nft delete table inet outline"
+    echo "  Fix: nft delete table inet outline"
     WARNINGS=$((WARNINGS + 1))
 fi
 
 for svc in outline-nftables outline-ss shadowsocks-libev; do
     if systemctl list-units --all 2>/dev/null | grep -qi "$svc"; then
         echo "⚠ WARNING: Stale service '$svc' found"
-        echo "  Fix: systemctl --user disable --now $svc"
+        echo "  Fix: systemctl disable --now $svc && rm /etc/systemd/system/$svc.service"
         WARNINGS=$((WARNINGS + 1))
     fi
 done
@@ -47,58 +61,74 @@ echo ""
 echo "── Installing CLI scripts to $BIN_DIR"
 mkdir -p "$BIN_DIR"
 
-for script in outline-ss configure-firefox-proxy; do
-    cp "$SCRIPT_DIR/cli/$script" "$BIN_DIR/$script"
-    chmod +x "$BIN_DIR/$script"
-    echo "   ✓ $script"
+for script in outline-ss configure-firefox-proxy outline-ss-pool outline-ss-runner; do
+    if [ -f "$SCRIPT_DIR/cli/$script" ]; then
+        cp "$SCRIPT_DIR/cli/$script" "$BIN_DIR/$script"
+        chmod +x "$BIN_DIR/$script"
+        echo "   ✓ $script"
+    fi
 done
 
-# Ensure ~/.local/bin in PATH for this session
-export PATH="$BIN_DIR:$PATH"
+# ── 2. Build & install outline-go-proxy ─────────────────────────────────
+echo ""
+echo "── Building outline-go-proxy"
+if [ -d "$SCRIPT_DIR/go-proxy" ]; then
+    if command -v go >/dev/null 2>&1; then
+        (cd "$SCRIPT_DIR/go-proxy" && CGO_ENABLED=0 go build -o "$BIN_DIR/outline-go-proxy" . 2>&1)
+        chmod +x "$BIN_DIR/outline-go-proxy"
+        echo "   ✓ outline-go-proxy built and installed"
+    elif [ -x "$BIN_DIR/outline-go-proxy" ]; then
+        echo "   ✓ outline-go-proxy already installed (Go not found, skipping build)"
+    else
+        echo "   ⚠ Go not found and outline-go-proxy not installed"
+        echo "     Install Go (golang-go) then re-run, or build manually:"
+        echo "     cd go-proxy && CGO_ENABLED=0 go build -o $BIN_DIR/outline-go-proxy ."
+    fi
+else
+    echo "   ⚠ go-proxy/ directory not found — skipping backend build"
+fi
 
-# ── 2. Install systemd user unit ────────────────────────────────────────
+# ── 3. Install systemd user unit ────────────────────────────────────────
 echo ""
 echo "── Installing systemd user unit"
 mkdir -p "$SYSTEMD_USER_DIR" "$OUTLINE_CONF_DIR"
 cp "$SCRIPT_DIR/systemd/outline-ss@.service" "$SYSTEMD_USER_DIR/outline-ss@.service"
-systemctl --user daemon-reload
-echo "   ✓ outline-ss@.service (daemon-reloaded)"
+systemctl daemon-reload
+echo "   ✓ outline-ss@.service"
 
-echo "── Checking outline-go-proxy"
-BACKEND="${OUTLINE_SS_BACKEND:-$HOME/.local/bin/outline-go-proxy}"
-if [ -x "$BACKEND" ]; then
-    echo "   ✓ $BACKEND"
-elif command -v outline-go-proxy >/dev/null 2>&1; then
-    BACKEND="$(command -v outline-go-proxy)"
-    echo "   ✓ $BACKEND"
+# ── 4. Write backend config ─────────────────────────────────────────────
+echo ""
+echo "── Writing system-wide backend config"
+if [ -x "$BIN_DIR/outline-go-proxy" ]; then
+    echo "OUTLINE_SS_BACKEND=$BIN_DIR/outline-go-proxy" > "$OUTLINE_CONF_DIR/backend.env"
+    echo "   ✓ $OUTLINE_CONF_DIR/backend.env → $BIN_DIR/outline-go-proxy"
 else
-    echo "   ⚠ outline-go-proxy not found — run: cd go-proxy && go build -o outline-go-proxy . && cp outline-go-proxy ~/.local/bin/"
+    echo "   ⚠ outline-go-proxy not installed — backend.env not written"
 fi
 
-# ── 2.5. Clean up stale proxy state from previous broken sessions ────────
+# ── 5. Clean up stale proxy state ───────────────────────────────────────
 echo ""
 echo "── Cleaning up stale proxy state..."
-"$BIN_DIR/configure-firefox-proxy" clear 2>/dev/null || true
+
+# Firefox proxy
+if [ -x "$BIN_DIR/configure-firefox-proxy" ]; then
+    sudo -u "$REAL_USER" "$BIN_DIR/configure-firefox-proxy" clear 2>/dev/null || true
+fi
 
 # Nuke any stray user.js files Outline may have left behind
-for userjs in "$HOME/.config/mozilla/firefox"/*/user.js "$HOME/.mozilla/firefox"/*/user.js; do
+for userjs in "$REAL_HOME/.config/mozilla/firefox"/*/user.js "$REAL_HOME/.mozilla/firefox"/*/user.js; do
     if [ -f "$userjs" ]; then
         grep -q "Auto-configured by Outline" "$userjs" 2>/dev/null && rm -f "$userjs"
     fi
 done 2>/dev/null || true
 
-# Reset KDE proxy to direct if it got stuck
+# Reset KDE proxy to direct
 if command -v kwriteconfig6 >/dev/null 2>&1; then
-    kwriteconfig6 --file kioslaverc --group "Proxy Settings" --key ProxyType --type int 0 2>/dev/null || true
-elif command -v kwriteconfig5 >/dev/null 2>&1; then
-    kwriteconfig5 --file kioslaverc --group "Proxy Settings" --key ProxyType --type int 0 2>/dev/null || true
-elif [ -f "$HOME/.config/kioslaverc" ]; then
-    sed -i 's/ProxyType=.*/ProxyType=0/' "$HOME/.config/kioslaverc" 2>/dev/null || true
-    sed -i '/socks5/d' "$HOME/.config/kioslaverc" 2>/dev/null || true
+    sudo -u "$REAL_USER" kwriteconfig6 --file kioslaverc --group "Proxy Settings" --key ProxyType --type int 0 2>/dev/null || true
 fi
 echo "   ✓ stale state cleaned"
 
-# ── 3. Install plasmoid ─────────────────────────────────────────────────
+# ── 6. Install plasmoid ─────────────────────────────────────────────────
 echo ""
 echo "── Installing plasmoid"
 
@@ -109,19 +139,22 @@ mkdir -p "$PLASMOID_DIR"
 cp -r "$SCRIPT_DIR/plasmoid/"* "$PLASMOID_DIR/"
 echo "   ✓ $PLASMOID_DIR"
 
-# ── 4. Restart Plasma shell ─────────────────────────────────────────────
+# ── 7. Restart Plasma shell (for the real user) ─────────────────────────
 echo ""
 echo "── Restarting Plasma shell..."
 
-if command -v plasmashell &>/dev/null; then
-    # Check if plasmashell is running
-    if pgrep -u "$USER" plasmashell >/dev/null 2>&1; then
-        kquitapp6 plasmashell 2>/dev/null || killall plasmashell 2>/dev/null || true
+if command -v plasmashell >/dev/null 2>&1; then
+    if pgrep -u "$REAL_UID" plasmashell >/dev/null 2>&1; then
+        sudo -u "$REAL_USER" DISPLAY="${DISPLAY:-:0}" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$REAL_UID/bus" \
+            kquitapp6 plasmashell 2>/dev/null || true
         sleep 1
-        plasmashell --replace &>/dev/null &
+        sudo -u "$REAL_USER" DISPLAY="${DISPLAY:-:0}" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$REAL_UID/bus" \
+            plasmashell --replace &>/dev/null &
         echo "   ✓ plasmashell restarted"
     else
-        echo "   ⚠ plasmashell not running (not on Plasma? skip)"
+        echo "   ⚠ plasmashell not running (will appear after next login)"
     fi
 else
     echo "   ⚠ plasmashell not found (not on Plasma?)"
@@ -129,10 +162,17 @@ fi
 
 # ── Done ─────────────────────────────────────────────────────────────────
 echo ""
-echo "==> Done!"
+echo "==> Done! System-wide install complete."
 echo ""
-echo "    Add the widget: right-click panel → Add Widgets → search 'Outline'"
-echo "    Then right-click the widget → Configure → paste your ssconf:// URL"
-echo "    Backend override: export OUTLINE_SS_BACKEND=~/.local/bin/outline-go-proxy"
-echo "                      or set it in ~/.config/outline-ss/backend.env"
+echo "    Any user can now:"
+echo "      1. Right-click panel → Add Widgets → search 'Outline'"
+echo "      2. Right-click widget → Configure → paste your ssconf:// URL"
+echo ""
+echo "    CLI usage:"
+echo "      outline-ss connect 'ssconf://...'"
+echo "      outline-ss status"
+echo "      outline-ss disconnect"
+echo "      outline-ss recover    # emergency cleanup"
+echo ""
+echo "    Backend: $(cat "$OUTLINE_CONF_DIR/backend.env" 2>/dev/null || echo 'NOT SET')"
 echo ""

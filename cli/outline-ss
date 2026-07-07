@@ -192,16 +192,44 @@ def _write_config(profile: str, config: dict, local_port: int):
 
 
 def _backend_candidates():
+    # 1. Environment variable (highest priority)
     env = os.environ.get(BACKEND_ENV, "").strip()
     if env:
         yield env
+    # 2. System-wide config (/etc/outline-ss/backend.env)
+    #    Written by install.sh --system or manually by the admin.
+    sys_conf = "/etc/outline-ss/backend.env"
+    try:
+        with open(sys_conf) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith(BACKEND_ENV + "="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if val:
+                        yield val
+    except (OSError, IOError):
+        pass
+    # 3. User config (~/.config/outline-ss/backend.env)
+    user_conf = os.path.join(CONF_DIR, "backend.env")
+    try:
+        with open(user_conf) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith(BACKEND_ENV + "="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if val:
+                        yield val
+    except (OSError, IOError):
+        pass
+    # 4. Well-known paths
     # Only outline-go-proxy — the official Outline SDK (same as Windows/Android).
     # No fallbacks.  sslocal / outline-local / shadowsocks-libev are not supported
     # and installing them can trigger dangerous system upgrades on Ubuntu/KDE Neon.
     # See _SAFETY.md.
     for cand in [
-        os.path.expanduser("~/.local/bin/outline-go-proxy"),
-        "outline-go-proxy",
+        "/usr/local/bin/outline-go-proxy",        # system-wide
+        os.path.expanduser("~/.local/bin/outline-go-proxy"),  # user-local
+        "outline-go-proxy",                       # PATH lookup
     ]:
         yield cand
 
