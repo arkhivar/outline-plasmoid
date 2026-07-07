@@ -275,3 +275,94 @@ mux solution can work.
 
 **Priority**: Medium. The pool proxy remains the best available solution;
 optimization and testing are the next steps.
+
+---
+
+## 11. `ss-local` / `shadowsocks-libev` destroys the host system — PHASED OUT
+
+**Symptom**: After a previous installation of the standalone Outline CLI,
+the host machine (KDE Neon 24.04, x86_64) experienced recurring total
+internet loss.  `ss-local` kept respawning via `outline-ss.service`
+(`Restart=always`), and `outline-nftables.service` recreated a kernel
+`nftables` table that redirected **all TCP traffic** (ports 1–65535) to
+a local proxy on port 12345.  When `ss-local` wasn't running, every
+network request silently timed out.
+
+**Root cause**: The standalone Outline CLI (a different tool from this
+plasmoid) installed two persistent systemd services that survived its
+removal:
+
+| Service | Damage |
+|---------|--------|
+| `outline-nftables.service` | Creates `table inet outline` in nftables — redirects ALL TCP to port 12345, excluding only RFC-1918 ranges |
+| `outline-ss.service` | Runs `ss-local` with `Restart=always` — respawns within milliseconds of being killed |
+
+Neither service was stopped or disabled by the Outline CLI uninstaller.
+They persisted across reboots and kept the nftables rules alive.
+
+**The cascading disaster**: Attempting to remove `shadowsocks-libev`
+(the package providing `ss-local`) via `apt-get remove shadowsocks-libev`
+triggered a **massive partial system upgrade** on KDE Neon:
+
+- Qt6 base: 6.8.2 → 6.11.1
+- KDE Frameworks 6: 6.11.0 → 6.26.0
+- Ubuntu base: 24.04.1 → 24.04.2
+- **929 packages** upgraded in an uncontrolled chain
+
+This left the system with incompatible library versions — `plasmashell`,
+`krunner`, and `kwin_wayland` all failed with `symbol lookup error:
+undefined symbol _ZN14QObjectPrivateC2Ei, version Qt_6_PRIVATE_API`.
+The desktop was completely broken (login loop → black screen → SDDM
+fallback).  Recovery required a full `apt-get dist-upgrade` + reinstall
+of `kde-plasma-desktop` with three Neon-specific base packages
+(`libeis1`, `liblcms2-2`, `libpoppler-qt6-3t64`) pinned to Neon versions.
+
+**Why `ss-local` is the wrong backend for this project**:
+
+1. **No TLS ClientHello prefix obfuscation support.**  The Outline server
+   requires a specific prefix (`0x16030100c2a80101`) for DPI evasion.
+   `ss-local` from `shadowsocks-libev` has no mechanism for this — it
+   silently corrupts or drops the prefix bytes (see §2 for the encoding
+   saga even when it was attempted via config).
+
+2. **`shadowsocks-libev` is a system package** — removing or upgrading it
+   via `apt` can cascade into unrelated system upgrades on rolling distros
+   like KDE Neon.
+
+3. **Stale systemd services from prior CLI installs** survive uninstall
+   and hijack the entire network stack via `nftables`.
+
+**Fix**: `ss-local` has been **phased out entirely**.  The widget now uses
+**`outline-go-proxy`** — a Go-based SOCKS5 proxy built from the official
+`outline-go-tun2socks` library, which handles Outline's TLS prefix
+obfuscation natively.  No other backend is needed or recommended.
+
+**Recovery steps for affected systems**:
+
+```bash
+# 1. Stop and permanently disable stale services
+sudo systemctl stop outline-ss.service outline-nftables.service
+sudo systemctl disable outline-ss.service outline-nftables.service
+sudo rm /etc/systemd/system/outline-ss.service
+sudo rm /etc/systemd/system/outline-nftables.service
+sudo rm /etc/nftables-outline.conf
+sudo systemctl daemon-reload
+
+# 2. Delete the nftables table
+sudo nft delete table inet outline
+
+# 3. Kill any lingering ss-local
+sudo killall ss-local 2>/dev/null
+
+# 4. Set the correct backend
+echo 'OUTLINE_SS_BACKEND=/usr/local/bin/outline-go-proxy' | \
+  sudo tee /etc/outline-ss/backend.env
+```
+
+> ⚠️ **Do NOT** `apt-get remove shadowsocks-libev` without first running
+> `sudo apt-get dist-upgrade` to stabilise the system.  See `_SAFETY.md`
+> §1 for the full warning.
+
+**Status**: ✅ `outline-go-proxy` deployed system-wide at
+`/usr/local/bin/outline-go-proxy`.  `ss-local` is no longer referenced
+anywhere in the project.  All stale systemd services removed.
