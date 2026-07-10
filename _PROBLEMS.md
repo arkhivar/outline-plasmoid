@@ -366,3 +366,198 @@ echo 'OUTLINE_SS_BACKEND=/usr/local/bin/outline-go-proxy' | \
 **Status**: ✅ `outline-go-proxy` deployed system-wide at
 `/usr/local/bin/outline-go-proxy`.  `ss-local` is no longer referenced
 anywhere in the project.  All stale systemd services removed.
+
+---
+
+## 12. The "2-connection server limit" was a misdiagnosis — it's frequency-based rate limiting
+
+**Symptom**: YouTube, Instagram, and LinkedIn failed to load through
+`sslocal`.  Russian sites worked intermittently.  The server at
+`194.247.182.162:24631` appeared to allow only 2 concurrent TCP connections.
+
+**What we thought**: Hard per-IP concurrent connection limit of 2.
+
+**What it actually is**: The server rate-limits by **connection frequency** —
+roughly 1 new connection per 2–3 seconds, with a burst tolerance of ~3.
+
+| Gap between connections | Success rate |
+|--------------------------|-------------|
+| 0s (parallel burst of 15) | 3/15 (20%) |
+| 1s | 4/8 (50%) |
+| 2s | 7/8 (88%) |
+| 5s | 10/10 (100%) |
+
+**Proof**: 10 sequential `curl` requests with 5-second gaps all succeeded
+(HTTP 200/302).  After 120 seconds of quiet, even YouTube/Instagram/LinkedIn
+all worked (HTTP 200 in 2–4s each).
+
+**How this caused days of debugging**: We built a **pool proxy**
+(`outline-ss-pool`) with a token-bucket rate limiter to serialize connections.
+The pool proxy's cooldown was initially set to 11 seconds (6× too slow),
+causing browser timeouts.  When we reduced it to 5s, the pool proxy itself
+**deadlocked** (see §13).
+
+**Resolution**: The `outline-go-proxy` (official Outline Go SDK) handles
+connections the same way Windows/Android clients do.  Firefox's built-in
+retry logic handles the server's rate limiting naturally.  No pool proxy
+needed.  The pool proxy code has been **removed entirely** from the connect
+path.
+
+---
+
+## 13. Pool proxy deadlocked — REMOVED
+
+**Symptom**: All connections through `outline-ss-pool` (port 1081) timed
+out.  Port 1081 was LISTENING but connections hung at the SOCKS5 handshake.
+Direct `sslocal` on port 1080 worked instantly.
+
+**Root cause**: The pool proxy accepted TCP connections but never completed
+the SOCKS5 handshake.  The process was alive (PID existed, port was open)
+but internally deadlocked — likely a race between the semaphore (max 2
+concurrent upstream connections) and the token bucket (cooldown timer).
+
+**What happened**: When 8 browser connections arrived simultaneously, the
+pool proxy gave 2 tokens immediately (burst) and queued the other 6.  But
+the semaphore slots were occupied by connections still actively downloading.
+The token bucket kept generating tokens, but the semaphore was full.
+Connections waited indefinitely for both a semaphore slot AND a token,
+creating a livelock.
+
+**Resolution**: Pool proxy **eliminated entirely**.  The architecture is now:
+
+```
+Browser → KDE proxy (1080) → outline-go-proxy → Outline server
+```
+
+No middleman.  No token buckets.  No semaphores.  One hop.
+
+**Lesson**: Don't build middleware to work around a problem you haven't
+correctly diagnosed.  The pool proxy was built to solve a "2-connection
+limit" that didn't exist (see §12).
+
+---
+
+## 14. `_check_tcp()` ghost probes wasted server connection tokens
+
+**Symptom**: `sslocal` logs showed `ERROR socks5 tcp client handler error:
+unexpected end of file` every ~3 seconds, even when no browser was
+connected.
+
+**Root cause**: The plasmoid's QML code polls `outline-ss status` every
+3 seconds (via `PlasmaCore.DataSource` with `interval: 3000`).  The old
+`cmd_status()` function called `_check_tcp(port=1080)` to verify the
+backend was alive.  This opened a TCP connection to `127.0.0.1:1080`,
+which triggered `sslocal` to accept the SOCKS5 connection — but the status
+checker immediately closed it without sending a proper SOCKS5 handshake,
+generating the error.
+
+While these local probes didn't create Shadowsocks connections to the
+server (confirmed: 0 connections to `194.247.182.162` during polling),
+they cluttered logs and, more importantly, consumed the **local** TCP
+connection slots that could have been used by real browser connections.
+
+**Resolution**: `cmd_status()` now uses PID file checking only
+(`_backend_running(profile)`), no TCP probes.  Zero log noise.
+
+---
+
+## 15. `sslocal` (shadowsocks-rust) is the wrong tool — replaced by `outline-go-proxy`
+
+**This is the single most important finding of the entire project.**
+
+**The problem**: `sslocal` (shadowsocks-rust) is a **generic Shadowsocks
+client**, not an Outline client.  Outline servers have specific requirements:
+
+1. **Prefix obfuscation**: Outline servers expect TLS ClientHello prefix
+   bytes prepended to the Shadowsocks salt.  `sslocal` needed base64 encoding
+   of these bytes, which kept corrupting through Python→JSON→Rust encoding
+   layers (§2, §3).  The official Outline Go client handles this natively
+   via `DecodeUTF8CodepointsToRawBytes()`.
+
+2. **Connection management**: `sslocal` forwarded each browser connection
+   to the server immediately.  The server's frequency-based rate limiter
+   dropped most of them.  The official Outline Go client's connection
+   management (same as Windows/Android) works naturally with the server's
+   rate limiting.
+
+3. **Protocol compatibility**: After switching to `outline-go-proxy`
+   (built on `outline-go-tun2socks`), YouTube, Instagram, LinkedIn, and
+   Russian sites **all worked immediately** — same key, same server,
+   different client library.
+
+**The fix**: Build a Go SOCKS5 proxy using the official Outline SDK:
+
+```
+go-proxy/main.go  →  outline-go-tun2socks/outline/shadowsocks
+                     ↓
+                     shadowsocks.NewPrefixSaltGenerator(prefix)
+                     ↓
+                     client.Dial(ctx, targetAddr)
+```
+
+This is the **exact same Go library** that powers Outline on Windows and
+Android.  The `NewClientFromJSON()` function accepts the Outline API's
+JSON format directly — including the Unicode prefix string that
+`DecodeUTF8CodepointsToRawBytes` converts to raw bytes.
+
+**Resolution**: `sslocal`, `outline-local`, and `shadowsocks-libev` are
+**intentionally excluded** from `_backend_candidates()`.  Only
+`outline-go-proxy` is supported.  See commit `f0bef10`.
+
+> **Do NOT add sslocal/outline-local/shadowsocks-libev back as fallbacks.**
+> See §11 for what happens when shadowsocks-libev is installed on KDE Neon.
+
+---
+
+## 16. Firefox proxy keeps coming back — use `user.js`, not `prefs.js`
+
+**Symptom**: After disconnecting the VPN, Firefox couldn't open any sites
+(not even `google.com`).  The proxy was stuck at `type=1` pointing to
+`127.0.0.1:1080` (dead port).  Vivaldi worked fine.
+
+**Root cause**: The old `configure-firefox-proxy set` function **deleted
+`user.js`** and wrote proxy settings to `prefs.js`.  But if Firefox was
+running during the disconnect, Firefox would re-write `prefs.js` on
+shutdown with its cached in-memory proxy settings (`type=1`), undoing
+the clear.  On next launch, Firefox found `type=1` in `prefs.js` with no
+`user.js` to override it.
+
+**The fix**: Both `set_firefox_proxy()` AND `clear_firefox_proxy()` now
+write `user.js`:
+
+| Action | user.js content | Effect |
+|--------|----------------|--------|
+| **Connect** | `type=1, socks=127.0.0.1:1080` | Forces proxy on every launch |
+| **Disconnect** | `type=0, socks=""` | Forces no-proxy on every launch |
+
+`user.js` is loaded **after** `prefs.js` at Firefox startup and **cannot
+be overridden** by Firefox's own state.  This survives Firefox running
+during disconnect — even if Firefox rewrites `prefs.js` with `type=1`
+on shutdown, `user.js` forces `type=0` on next launch.
+
+**Resolution**: Commit `6c5e912`.  Both set and clear write `user.js`.
+
+---
+
+## 17. Vivaldi (Chromium) doesn't read KDE SOCKS5 proxy — configure directly
+
+**Symptom**: Vivaldi couldn't open any sites when VPN was active.
+Firefox worked fine through the same SOCKS5 proxy.
+
+**Root cause**: Chromium-based browsers don't reliably read KDE system
+SOCKS5 proxy settings.  Vivaldi's Preferences JSON had `proxy: {}` (empty),
+falling back to system detection — which failed for SOCKS5.
+
+**The fix**: `_set_vivaldi_proxy()` writes to
+`~/.config/vivaldi/Default/Preferences`:
+
+```json
+{"proxy": {"mode": "fixed_servers", "server": "socks5://127.0.0.1:1080", "bypass_list": "<local>"}}
+```
+
+On disconnect, `_clear_vivaldi_proxy()` restores:
+```json
+{"proxy": {"mode": "system"}}
+```
+
+**Resolution**: Commit `da95c22`.
