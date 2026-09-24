@@ -32,6 +32,9 @@ outline-plasmoid/
 │           └── main.xml        # Persistent config schema (ssconf_url, local_port)
 ├── cli/
 │   ├── outline-ss              # Python CLI: connect/disconnect/status/cleanup/recover
+│   ├── outline-ss-pool         # Python: SOCKS5 connection-pool proxy (legacy — off
+│   │                           #   the connect path since §12/§13, kept for manual use)
+│   ├── outline-ss-runner       # sh shim used by the systemd unit
 │   └── configure-firefox-proxy # Python: sets/clears Firefox SOCKS5 on ALL profiles
 ├── go-proxy/
 │   ├── main.go                 # Go SOCKS5 proxy (official outline-go-tun2socks SDK)

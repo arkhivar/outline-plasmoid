@@ -111,12 +111,12 @@ PlasmoidItem {
     }
 
     // ── Status polling (every 3s via DataSource interval) ─────────────
-    // Uses full path to outline-ss so plasmashell can find it.
+    // Profile follows the widget configuration, not a hardcoded "default".
     P5Support.DataSource {
         id: statusSource
         engine: "executable"
         interval: 3000
-        connectedSources: ["outline-ss status --profile default"]
+        connectedSources: ["outline-ss status --profile " + shQuote(plasmoid.configuration.profile || "default")]
 
         onNewData: function(sourceName, data) {
             try {
@@ -141,9 +141,13 @@ PlasmoidItem {
 
         onNewData: function(sourceName, data) {
             var resp = ((data.value || data.stdout || "").trim()).toLowerCase()
+            var code = data.exitCode
             if (resp.indexOf("error:") >= 0) {
                 root.outlineStatus = "error"
                 root.errorMessage = resp.substring(resp.indexOf("error:") + 6).trim()
+            } else if (code !== undefined && code !== 0) {
+                root.outlineStatus = "error"
+                root.errorMessage = resp || ("exit code " + code)
             }
             // Release the source so we can re-fire next click
             disconnectSource(sourceName)
@@ -151,6 +155,12 @@ PlasmoidItem {
     }
 
     // ── Connect / Disconnect actions ───────────────────────────────────
+    // Shell-quote a value interpolated into an executable-engine command
+    // (the engine runs commands through sh -c).
+    function shQuote(s) {
+        return "'" + String(s).replace(/'/g, "'\\''") + "'"
+    }
+
     // All args go BEFORE the positional URL arg (argparse requirement).
     function doConnect() {
         var url = plasmoid.configuration.accessUrl
@@ -164,9 +174,9 @@ PlasmoidItem {
         root.outlineStatus = "connecting"
         actionSource.connectSource(
             "outline-ss connect" +
-            " --profile " + profile +
+            " --profile " + shQuote(profile) +
             " --local-port " + port +
-            " \"" + url + "\""
+            " " + shQuote(url)
         )
     }
 
@@ -174,6 +184,6 @@ PlasmoidItem {
         var profile = plasmoid.configuration.profile || "default"
         // disconnect handles both process stop AND proxy cleanup
         // (calling connectSource twice cancels the first — only run one)
-        actionSource.connectSource("outline-ss disconnect --profile " + profile)
+        actionSource.connectSource("outline-ss disconnect --profile " + shQuote(profile))
     }
 }
