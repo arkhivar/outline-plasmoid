@@ -45,6 +45,17 @@ def _run(args, capture=True, check=False):
         raise RuntimeError("Command timed out")
 
 
+def _fail(msg: str):
+    """Report an error on stdout AND stderr, then exit non-zero.
+
+    The plasmoid's executable DataSource only sees stdout, while terminal
+    users read stderr — both get the same message.
+    """
+    print(f"error: {msg}")
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
 def _service_name(profile):
     return SERVICE_TEMPLATE.format(profile=profile)
 
@@ -277,10 +288,14 @@ def _proc_alive(pid: int):
         return False
 
 
-def _start_backend(profile: str, backend: str, conf_path: str):
+def _start_backend(profile: str, backend: str, conf_path: str, listen_addr: str = None):
     """Launch backend directly as a detached child (no systemd)."""
     log = open(_log_path(profile), "a")
     cmd = [backend, "--config", conf_path]
+    if listen_addr:
+        # outline-go-proxy supports --listen; without it the backend always
+        # binds 127.0.0.1:1080 and a custom --local-port never gets traffic.
+        cmd += ["--listen", listen_addr]
     proc = subprocess.Popen(
         cmd,
         stdout=log,
@@ -450,6 +465,28 @@ def _set_vivaldi_proxy(host="127.0.0.1", port=1080):
         sys.stderr.write(f"Warning: failed to set Vivaldi proxy: {e}\n")
 
 
+def _clear_kde_proxy():
+    """Clear KDE system proxy settings (kioslaverc) and force a re-read."""
+    try:
+        # Reset proxy type first (required before deleting key-value pairs)
+        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "ProxyType", "--type", "int", "0"], check=False)
+        # Delete all proxy entries
+        for key in ("socksProxy", "httpProxy", "httpsProxy", "ftpProxy",
+                    "NoProxyFor", "ReversedException", "Proxy Config Script"):
+            _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", key, "--delete"], check=False)
+        # Force KDE to re-read: kded6 reconfig + KIO scheduler signal (belt and suspenders)
+        _run(["dbus-send", "--session", "--dest=org.kde.kded6", "/kded", "org.kded6.reconfigure"], check=False)
+        _run(["dbus-send", "--session", "--type=signal", "/KIO/Scheduler", "org.kde.KIO.Scheduler.proxyChanged"], check=False)
+        # Verify
+        result = _run(["kreadconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "ProxyType"], check=False)
+        if result != "0":
+            sys.stderr.write(f"⚠ KDE proxy clear may have failed (ProxyType={result}); running kwriteconfig6 again\n")
+            _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "ProxyType", "--type", "int", "0"], check=False)
+        sys.stderr.write("✓ System proxy cleared\n")
+    except Exception as e:
+        sys.stderr.write(f"Warning: failed to clear KDE proxy: {e}\n")
+
+
 def _clear_vivaldi_proxy():
     """Clear Vivaldi proxy settings, restore to system default."""
     vivaldi_prefs = Path.home() / ".config" / "vivaldi" / "Default" / "Preferences"
@@ -467,24 +504,6 @@ def _clear_vivaldi_proxy():
             sys.stderr.write("✓ Vivaldi proxy cleared\n")
     except Exception as e:
         sys.stderr.write(f"Warning: failed to clear Vivaldi proxy: {e}\n")
-    try:
-        # Reset proxy type first (required before deleting key-value pairs)
-        _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "ProxyType", "--type", "int", "0"], check=False)
-        # Delete all proxy entries
-        for key in ("socksProxy", "httpProxy", "httpsProxy", "ftpProxy",
-                    "NoProxyFor", "ReversedException", "Proxy Config Script"):
-            _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", key, "--delete"], check=False)
-        # Force KDE to re-read: kded6 reconfig + KIO scheduler signal (belt and suspenders)
-        _run(["dbus-send", "--session", "--dest=org.kde.kded6", "/kded", "org.kde.kded6.reconfigure"], check=False)
-        _run(["dbus-send", "--session", "--type=signal", "/KIO/Scheduler", "org.kde.KIO.Scheduler.proxyChanged"], check=False)
-        # Verify
-        result = _run(["kreadconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "ProxyType"], check=False)
-        if result != "0":
-            sys.stderr.write(f"⚠ KDE proxy clear may have failed (ProxyType={result}); running kwriteconfig6 again\n")
-            _run(["kwriteconfig6", "--file", "kioslaverc", "--group", "Proxy Settings", "--key", "ProxyType", "--type", "int", "0"], check=False)
-        sys.stderr.write("✓ System proxy cleared\n")
-    except Exception as e:
-        sys.stderr.write(f"Warning: failed to clear KDE proxy: {e}\n")
 
 
 def _cleanup_proxy():
@@ -515,8 +534,7 @@ def cmd_connect(url: str, profile: str = DEFAULT_PROFILE, local_port: int = DEFA
         if re.match(r'^[\w.-]+:\d+', url) or url.startswith("https://"):
             url = url.replace("https://", "ssconf://", 1) if url.startswith("https://") else f"ssconf://{url}"
         else:
-            print("error: URL must start with ssconf:// or be a host:port/path", file=sys.stderr)
-            sys.exit(1)
+            _fail("URL must start with ssconf:// or be a host:port/path")
     try:
         backend = _detect_backend()
         # Stop any existing instance (direct or systemd)
@@ -545,7 +563,8 @@ def cmd_connect(url: str, profile: str = DEFAULT_PROFILE, local_port: int = DEFA
         else:
             conf_path = _write_config(profile, config, local_port)
         sys.stderr.write(f"Config: {conf_path} (backend={backend}, server={config['server']}:{config['server_port']})\n")
-        pid = _start_backend(profile, backend, conf_path)
+        listen = f"127.0.0.1:{local_port}" if is_go else None
+        pid = _start_backend(profile, backend, conf_path, listen_addr=listen)
         sys.stderr.write(f"Started backend pid={pid}, log={_log_path(profile)}\n")
         # Wait for port to open
         for _ in range(20):
@@ -560,8 +579,7 @@ def cmd_connect(url: str, profile: str = DEFAULT_PROFILE, local_port: int = DEFA
             _run([ff_proxy, "--port", str(local_port)], check=False)
         print("ok" if _check_tcp(port=local_port) else "ok (starting)")
     except Exception as e:
-        print(f"error: {e}", file=sys.stderr)
-        sys.exit(1)
+        _fail(str(e))
 
 
 def cmd_disconnect(profile: str = DEFAULT_PROFILE):
@@ -573,8 +591,7 @@ def cmd_disconnect(profile: str = DEFAULT_PROFILE):
         _cleanup_proxy()
         print("ok")
     except Exception as e:
-        print(f"error: {e}", file=sys.stderr)
-        sys.exit(1)
+        _fail(str(e))
 
 
 def cmd_cleanup(profile: str = DEFAULT_PROFILE):
@@ -587,8 +604,7 @@ def cmd_cleanup(profile: str = DEFAULT_PROFILE):
             subprocess.run([ff_proxy, "clear"], check=False)
         print("ok")
     except Exception as e:
-        print(f"error: {e}", file=sys.stderr)
-        sys.exit(1)
+        _fail(str(e))
 
 
 def cmd_recover():

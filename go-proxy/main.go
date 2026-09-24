@@ -129,6 +129,11 @@ func handleConn(local net.Conn, client *oss.Client) {
 			return
 		}
 		target = string(buf[:domainLen])
+	case 0x04: // IPv6
+		if _, err := io.ReadFull(local, buf[:16]); err != nil {
+			return
+		}
+		target = net.IP(buf[:16]).String()
 	default:
 		return
 	}

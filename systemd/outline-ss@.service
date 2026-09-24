@@ -5,9 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/outline-ss-runner %i
+# Resolve the runner from either install location (system-wide first,
+# then user-local) — install.sh copies to /usr/local/bin, AGENTS.md flow
+# uses ~/.local/bin. $$ passes a literal $ through systemd to the shell.
+ExecStart=/bin/sh -c 'if [ -x /usr/local/bin/outline-ss-runner ]; then exec /usr/local/bin/outline-ss-runner "$$1"; elif [ -x "$$HOME/.local/bin/outline-ss-runner" ]; then exec "$$HOME/.local/bin/outline-ss-runner" "$$1"; else echo "outline-ss-runner not found (looked in /usr/local/bin and ~/.local/bin)" >&2; exit 127; fi' sh %i
 # Defense in depth: cleanup runs on ANY stop (manual, crash, or reboot)
-ExecStopPost=-%h/.local/bin/outline-ss cleanup --profile %i
+ExecStopPost=-/bin/sh -c 'outline-ss cleanup --profile "$$1" 2>/dev/null || "$$HOME/.local/bin/outline-ss" cleanup --profile "$$1"' sh %i
 Restart=on-failure
 RestartSec=5
 

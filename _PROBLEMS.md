@@ -561,3 +561,82 @@ On disconnect, `_clear_vivaldi_proxy()` restores:
 ```
 
 **Resolution**: Commit `da95c22`.
+
+---
+
+## 18. Batch of silent-failure bugs (2026-09-24 audit)
+
+Found in a full-code review pass; all fixed in the same sweep.
+
+### 18.1 `disconnect` / `cleanup` / `recover` crashed with `NameError` — proxy never cleared
+
+**Symptom**: After disconnect, browsers stayed pointed at the dead SOCKS5
+port. Terminal runs of `outline-ss disconnect` printed a Python traceback
+(`NameError: name '_clear_kde_proxy' is not defined`) and exited 1 — so even
+the emergency `recover` path was broken.
+
+**Root cause**: `_cleanup_proxy()` called `_clear_kde_proxy()`, but that
+function did not exist. Its body had been merged into the tail of
+`_clear_vivaldi_proxy()` (a mis-indented second `try:` block). Worse: when
+Vivaldi's `Preferences` file was absent, `_clear_vivaldi_proxy()` returned
+early and the buried KDE-clearing code never ran on any code path.
+
+**Fix**: Extracted a real `_clear_kde_proxy()`; `_clear_vivaldi_proxy()` now
+contains only Vivaldi logic.
+
+### 18.2 Custom `--local-port` silently broken with outline-go-proxy
+
+**Symptom**: Setting a non-1080 port in the widget config meant the backend
+still listened on 1080 while everything else waited on the configured port —
+connect hung forever at "starting".
+
+**Root cause**: `_start_backend()` never passed `--listen` to
+`outline-go-proxy`, which supports it (default `127.0.0.1:1080`).
+
+**Fix**: `cmd_connect()` now passes `--listen 127.0.0.1:<local_port>` to the
+Go backend.
+
+### 18.3 Plasmoid never showed CLI errors
+
+**Root cause**: Errors were printed to stderr only; the plasmoid's
+executable DataSource sees stdout. Combined with the `NameError` above, every
+failure was invisible in the widget (stuck "Connecting…" until the next
+status poll).
+
+**Fix**: New `_fail()` helper prints `error: …` to **both** streams; the QML
+`actionSource` also checks `data.exitCode`.
+
+### 18.4 Status poller hardcoded `--profile default`
+
+**Root cause**: `statusSource.connectedSources` was a static string. With any
+other profile configured, the widget showed "disconnected" while the tunnel
+ran.
+
+**Fix**: Source string is now bound to `plasmoid.configuration.profile`;
+commands are shell-escaped (`shQuote()`) since the executable engine runs
+through `sh -c`.
+
+### 18.5 go-proxy dropped IPv6 SOCKS5 targets
+
+**Root cause**: `handleConn()` had no `case 0x04` (IPv6 ATYP) — any
+IPv6-resolved target was silently dropped.
+
+**Fix**: Added the 16-byte IPv6 case.
+
+### 18.6 systemd unit paths assumed user-local install
+
+**Root cause**: `ExecStart=%h/.local/bin/outline-ss-runner` breaks for
+system-wide installs (`/usr/local/bin`); a failed start then triggered
+`ExecStopPost`, which wiped proxy settings as a side effect.
+
+**Fix**: Exec lines resolve the binary from `/usr/local/bin` first, then
+`~/.local/bin`, via `/bin/sh -c` with `$$` escaping.
+
+### 18.7 Minor
+
+- `outline-ss-pool`: `ConnectionPool.acquire()` decremented `_active`
+  outside the condition lock — moved inside (benign in pure asyncio, but
+  exactly the ordering fragility §13 worried about).
+- `install.sh`: only the *system* manager was daemon-reloaded after copying
+  a **user** unit; the installer now also reloads `$REAL_USER`'s user
+  manager when their session bus is available.

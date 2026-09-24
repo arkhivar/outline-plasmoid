@@ -137,8 +137,8 @@ class ConnectionPool:
                 with contextlib.suppress(Exception):
                     await writer.wait_closed()
         finally:
-            self._active -= 1
             async with self._active_cond:
+                self._active -= 1
                 self._active_cond.notify_all()
 
 

@@ -94,6 +94,12 @@ echo "── Installing systemd user unit"
 mkdir -p "$SYSTEMD_USER_DIR" "$OUTLINE_CONF_DIR"
 cp "$SCRIPT_DIR/systemd/outline-ss@.service" "$SYSTEMD_USER_DIR/outline-ss@.service"
 systemctl daemon-reload
+# The system-manager reload above does not refresh user managers;
+# reload the installing user's manager if their session bus is up.
+sudo -u "$REAL_USER" \
+    XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$REAL_UID/bus" \
+    systemctl --user daemon-reload 2>/dev/null || true
 echo "   ✓ outline-ss@.service"
 
 # ── 4. Write backend config ─────────────────────────────────────────────
